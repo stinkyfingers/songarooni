@@ -1,0 +1,11 @@
+/bin/
+*.wav
+test_images
+plans 
+samples
+whisper.cpp 
+notes.txt
+songs.txt
+.env
+.DS_Store
+CLAUDE.md

@@ -1,0 +1,340 @@
+# songlistener
+
+Listens to a microphone (or line input, via a USB audio interface) during
+a live band performance, and identifies which song from a supplied list
+is being announced, using [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
+for fully offline speech recognition and a fuzzy text matcher tolerant of
+imperfect transcription. See [plans/init.md](plans/init.md) for the full
+design brief this implements (phase 1).
+
+This covers phase 1 only: identifying the song. Phase 2 (slideshow
+playback via `feh` or similar) is not yet implemented.
+
+## Architecture
+
+```
+microphone/line-in
+  -> internal/audio  (capture + energy-based VAD segmentation)
+  -> internal/speech (whisper.cpp subprocess, per segment)
+  -> internal/matcher (fuzzy match transcript against song list)
+  -> internal/app     (wiring, logging, SONG_MATCH event)
+```
+
+Package layout:
+
+- `cmd/songlistener` — CLI: flag parsing and wiring only.
+- `internal/songs` — loads the song list from a text file.
+- `internal/matcher` — fuzzy string matching. Pure Go, no I/O, fully unit
+  tested independent of audio/whisper.
+- `internal/audio` — `Source` interface (microphone via
+  [malgo](https://github.com/gen2brain/malgo), or a WAV file for
+  dev/testing) and an energy-based voice-activity segmenter.
+- `internal/speech` — `Recognizer` interface, implemented by shelling out
+  to the whisper.cpp CLI.
+- `internal/app` — `Pipeline` wires the above together and defines the
+  `SONG_MATCH` event.
+
+Each of `Source`, `Recognizer`, and the matcher is an interface so the
+pipeline can be (and is) tested with fakes, with no microphone, whisper.cpp
+binary, or model required — see `internal/app/pipeline_test.go`.
+
+## Dependencies
+
+Kept intentionally minimal:
+
+- [`github.com/gen2brain/malgo`](https://github.com/gen2brain/malgo) — Go
+  bindings for miniaudio, used only for microphone capture
+  (`internal/audio/mic.go`). Chosen over alternatives like `portaudio`
+  because miniaudio is vendored as C source with no external system
+  library to install, and malgo has working support for both macOS and
+  Linux/ARM. It does require CGO — see "Building for Raspberry Pi" below
+  for what that means for deployment.
+- Everything else (song loading, matching, WAV encode/decode, VAD, CLI) is
+  standard library only.
+
+whisper.cpp itself is a separate native dependency, built and run as a
+subprocess — not a Go module dependency at all (see below).
+
+## whisper.cpp integration: subprocess, not bindings
+
+whisper.cpp has official Go bindings (CGO) as well as a plain CLI. This
+project shells out to the CLI (`whisper-cli`) rather than using the
+bindings or writing a CGO wrapper:
+
+- **Go bindings / CGO wrapper**: no per-call process-start overhead, but
+  ties the whole Go build to CGO and to a whisper.cpp checkout that's
+  ABI-compatible with the bindings, on *both* macOS and the Pi. Ordinary
+  `go build`/cross-compilation stops being an option; every target needs
+  a matched native (or carefully cross-compiled) libwhisper build.
+- **Subprocess (chosen)**: the Go program stays pure Go — fast, ordinary
+  `GOOS`/`GOARCH` cross-compilation for the app itself, no linking
+  headaches for *this* code. The whisper.cpp binary and model can be
+  swapped or upgraded independently, by replacing a file on the Pi. Cost:
+  one process start per speech segment, and the transcript is exchanged
+  via a temp WAV file + stdout instead of an in-process call. Segments
+  are 1-5 seconds and infrequent (only when someone talks near the mic),
+  so this overhead is negligible next to transcription time itself, even
+  on a Pi 3.
+
+Given the plan's emphasis on reliability and simple deployment, the
+subprocess approach wins. `internal/speech.Recognizer` is an interface
+specifically so this choice could be swapped later without touching
+`internal/app` or `cmd/songlistener`.
+
+## Fuzzy matching
+
+The matcher (`internal/matcher`) never compares the whole transcript
+against the whole title. Instead, for each known title it:
+
+1. Normalizes both the title and the transcript (lowercase, expand a
+   small set of contractions, strip punctuation, collapse whitespace).
+   Deliberately *no* stemming — with only ~100 short titles, aggressive
+   stemming risks making distinct titles collide.
+2. Slides a word-window across the transcript, sized to the title's own
+   word count (and one shorter/longer, to tolerate whisper dropping or
+   inserting a word like a trailing "next").
+3. Scores each window against the title with a blend of:
+   - Jaro-Winkler similarity (rewards shared characters and a common
+     prefix — good for single-letter mishears like "honky"/"hanky")
+   - fuzzy token overlap (each title word is matched against its closest
+     transcript word, not required to match exactly — "women" ≈ "woman")
+   - normalized Levenshtein edit-distance similarity
+   - a full-marks bonus if the normalized title appears verbatim as a
+     contiguous run of words in the transcript
+4. Takes the best score per title across all windows.
+
+The best- and second-best-scoring titles are returned together. A match
+is only reported "confident" if **both**:
+
+- the best score clears `--score-threshold` (default 0.78), **and**
+- the margin over the second-best clears `--margin-threshold` (default
+  0.08)
+
+Both are required because a false positive (announcing the wrong song) is
+worse than reporting no match — see `internal/matcher/matcher_test.go` for
+a test built specifically around several similar "Honky Tonk ..." titles
+to exercise this margin logic.
+
+No phonetic algorithm (e.g. Soundex/Metaphone) is used: Jaro-Winkler plus
+fuzzy token overlap already handles the example Whisper errors in the
+design brief, and adding a phonetic dependency didn't seem to earn its
+keep for ~100 short English titles.
+
+## Raspberry Pi performance considerations
+
+- **Model**: use `tiny.en` on a Pi 3 — it's the only model with headroom
+  for real-time-ish transcription of 1-5s segments on that CPU. `--model`
+  is just a path, so `base.en` etc. can be tried by pointing at a
+  different `.bin` file, no rebuild needed.
+- **VAD avoids unnecessary Whisper calls**: `internal/audio.Segmenter` is
+  a cheap energy-based (RMS) detector that only emits a segment — and
+  only then does whisper.cpp get invoked — once real speech is seen and
+  enough trailing silence ends it. Background music/chatter/applause
+  that never crosses the energy threshold costs nothing beyond the RMS
+  calculation on incoming frames.
+- **Short segments**: `--vad-max-segment-ms` (default 8000) bounds worst
+  case segment length, so a stuck-open segment (e.g. continuous loud
+  background music) can't turn into a huge, slow transcription job.
+- **whisper.cpp threads**: pass `--threads 4` (or the Pi's actual core
+  count) so whisper.cpp uses all cores; leaving it at whisper.cpp's own
+  default may under-use the Pi 3's 4 cores depending on the build.
+- **Quantized models**: whisper.cpp's `tiny.en-q5_1`/`q8_0` quantized
+  models trade a small amount of accuracy for meaningfully less CPU and
+  memory; worth trying if `tiny.en` isn't fast enough in practice.
+- **Avoid unnecessary allocations**: the VAD/segmenter path reuses a
+  frame-sized buffer while scanning and only allocates once per completed
+  segment; the matcher does no per-title heap-heavy work beyond small
+  string comparisons across ~100 titles, which is trivial even on a Pi 3.
+
+## Mac development setup
+
+```
+brew install cmake  # whisper.cpp's build uses cmake
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+cmake -B build
+cmake --build build -j --config Release
+```
+
+This produces `build/bin/whisper-cli`. Either add it to your `PATH` or
+pass its path via `--whisper-bin`.
+
+Download a model (from inside the whisper.cpp checkout):
+
+```
+sh ./models/download-ggml-model.sh tiny.en
+```
+
+This places a model at `whisper.cpp/models/ggml-tiny.en.bin` — pass that
+path via `--model`.
+
+Build songlistener:
+
+```
+make build     # -> bin/songlistener
+```
+
+## Running the text-only matcher (no audio, no whisper.cpp)
+
+Useful while tuning the matcher or song list:
+
+```
+bin/songlistener --songs songs.txt --text "hey guys let's play honky tonk woman next"
+```
+
+Or via `make run-text TEXT="..."`. Exits 0 on a confident match, 1
+otherwise, so it's scriptable for regression checks.
+
+Run the unit tests (matcher, VAD, WAV encode/decode, whisper.cpp arg/output
+parsing, and full-pipeline wiring with fakes — none require real audio
+hardware or a whisper.cpp binary):
+
+```
+make test
+```
+
+## Running against a prerecorded WAV file
+
+For development/regression testing without a live microphone. The WAV
+file should be 16kHz mono (whisper.cpp's expected input); other formats
+may decode but will likely transcribe poorly.
+
+```
+bin/songlistener \
+  --songs songs.txt \
+  --model /path/to/whisper.cpp/models/ggml-tiny.en.bin \
+  --whisper-bin /path/to/whisper.cpp/build/bin/whisper-cli \
+  --audio test.wav
+```
+
+This runs the file through VAD segmentation exactly like the live path,
+then exits.
+
+## Microphone setup and running live
+
+Connect the line/mic source to a USB audio interface, plug that into the
+Mac/Pi, and confirm the OS sees it as an input device (e.g. macOS Sound
+settings, or `arecord -l` on Linux).
+
+```
+bin/songlistener \
+  --songs songs.txt \
+  --model /path/to/whisper.cpp/models/ggml-tiny.en.bin \
+  --whisper-bin /path/to/whisper.cpp/build/bin/whisper-cli
+```
+
+This runs continuously until Ctrl-C (or SIGTERM). On each confident
+match it prints a machine-readable line to stdout:
+
+```
+SONG_MATCH: Honky Tonk Women
+```
+
+which is the natural hook for a future output sink (HTTP, MQTT, GPIO,
+writing a JSON event, driving a stage display, etc.) — not implemented
+here beyond this stdout line, per the design brief.
+
+If the VAD is too sensitive/insensitive for your venue's noise floor,
+tune `--vad-energy-threshold` (and `--vad-min-speech-ms`,
+`--vad-silence-ms`) — run with a real recording of venue background noise
+via `--audio` to dial these in before the show.
+
+## Building for Raspberry Pi
+
+**CGO is required** for this project, because microphone capture
+(`internal/audio/mic.go`) uses malgo/miniaudio, which is C. Plain
+`GOOS=linux GOARCH=arm GOARM=7 go build` will *not* work for a full build
+without a matching cross-compiling C toolchain — pretending otherwise
+would just fail on the Pi.
+
+Two options:
+
+### Option A — build natively on the Pi (recommended)
+
+Raspberry Pi OS ships a C compiler, so this "just works" and avoids any
+cross-toolchain fragility:
+
+```
+# on the Pi, with Go installed and this repo copied over:
+make build-pi-native   # -> bin/songlistener-linux-arm
+```
+
+### Option B — cross-compile from macOS (best effort)
+
+Requires an `arm-linux-gnueabihf` CGO cross toolchain, e.g.:
+
+```
+brew install messense/macos-cross-toolchains/arm-unknown-linux-gnueabihf
+```
+
+then:
+
+```
+make build-pi-cross    # -> bin/songlistener-linux-arm
+```
+
+If this toolchain setup gives you trouble, fall back to Option A — it's
+the more reliably reproducible path and is what's recommended for actual
+deployment.
+
+## Deploying to the Raspberry Pi
+
+1. Build (Option A or B above) or copy a prebuilt `bin/songlistener-linux-arm`
+   to the Pi.
+2. Copy `songs.txt` (or your real song list) to the Pi.
+3. Build whisper.cpp *on the Pi* (same cmake steps as the Mac section
+   above — whisper.cpp is a native binary too, and needs to match the
+   Pi's architecture) and download the `tiny.en` model there.
+4. Run:
+   ```
+   ./songlistener-linux-arm \
+     --songs songs.txt \
+     --model ~/whisper.cpp/models/ggml-tiny.en.bin \
+     --whisper-bin ~/whisper.cpp/build/bin/whisper-cli \
+     --threads 4
+   ```
+
+## Example CLI commands
+
+```
+songlistener --help
+
+songlistener --songs songs.txt --text "this one's take it easy"
+
+songlistener --songs songs.txt --model models/ggml-tiny.en.bin --audio test.wav
+
+songlistener --songs songs.txt --model models/ggml-tiny.en.bin \
+  --whisper-bin whisper.cpp/build/bin/whisper-cli \
+  --vad-energy-threshold 0.03 --vad-silence-ms 400 \
+  --score-threshold 0.8 --margin-threshold 0.1
+```
+
+## Things to test first on the Raspberry Pi 3
+
+- **Real transcription latency**: time a single `--audio` run against a
+  representative 1-5s recording made *on the actual venue's mic/interface*,
+  with `tiny.en`, to see how much headroom exists before a live segment
+  finishes speaking. If it's too slow, try a quantized `tiny.en` model or
+  reduce `--vad-max-segment-ms`.
+- **VAD threshold in the real room**: capture a few minutes of real
+  soundcheck audio (crowd noise, band tuning, talkback chatter) via
+  `--audio` against a recording, and tune `--vad-energy-threshold`/
+  `--vad-min-speech-ms`/`--vad-silence-ms` so it doesn't fire on
+  applause/music but does reliably catch talkback speech.
+- **Microphone/USB interface enumeration**: confirm malgo picks up the
+  correct default input device on the Pi (vs. onboard audio, if any) —
+  test with `arecord -l` and, if needed, set the device as the system
+  default before relying on `internal/audio.NewMicSource`'s use of the
+  default capture device.
+- **CPU/thermal headroom under sustained use**: run songlistener for the
+  duration of a full set/show and watch CPU temp and throttling
+  (`vcgencmd measure_temp`), since repeated whisper.cpp invocations over
+  hours is a different load profile than a short test.
+- **Memory usage over a long run**: confirm no slow leak across many
+  segments (each segment's temp WAV is removed after transcription;
+  worth double-checking `/tmp` isn't accumulating files if a run is ever
+  killed mid-segment).
+- **False-positive rate against real crowd noise**: play back a recording
+  of a noisy room (with no song announcements) through `--audio` and
+  confirm `--score-threshold`/`--margin-threshold` are conservative
+  enough that nothing fires — false positives are worse than silence.
