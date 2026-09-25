@@ -1,0 +1,9 @@
+.git
+bin
+whisper.cpp
+samples
+test_images
+plans
+notes.txt
+*.wav
+.DS_Store

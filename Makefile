@@ -2,7 +2,7 @@ BINARY  := songarooni
 CMD     := ./cmd
 BIN_DIR := bin
 
-.PHONY: all build test vet fmt clean build-pi-native build-pi-cross run-text
+.PHONY: all build test vet fmt clean build-pi-native build-pi-cross build-pi-docker run-text
 
 all: build test vet
 
@@ -41,6 +41,16 @@ build-pi-cross:
 	CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM=7 \
 		CC=arm-linux-gnueabihf-gcc \
 		go build -o $(BIN_DIR)/$(BINARY)-linux-arm $(CMD)
+
+# Cross-build for a Raspberry Pi 3 (32-bit, armv7) using Docker Buildx's
+# QEMU emulation (see Dockerfile): runs an ordinary native `go build`
+# inside a real armv7 Linux container, avoiding both the cross-compiler
+# naming issues above and the risk of linking against a newer glibc than
+# your actual Pi OS ships. Requires Docker Desktop (buildx included).
+# Produces $(BIN_DIR)/songlistener-linux-arm.
+build-pi-docker:
+	mkdir -p $(BIN_DIR)
+	docker buildx build --platform linux/arm/v7 --target export --output type=local,dest=$(BIN_DIR) .
 
 # Convenience target for tuning the matcher: make run-text TEXT="..."
 run-text:

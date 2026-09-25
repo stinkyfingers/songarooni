@@ -247,7 +247,7 @@ via `--audio` to dial these in before the show.
 without a matching cross-compiling C toolchain — pretending otherwise
 would just fail on the Pi.
 
-Two options:
+Three options:
 
 ### Option A — build natively on the Pi (recommended)
 
@@ -277,9 +277,30 @@ If this toolchain setup gives you trouble, fall back to Option A — it's
 the more reliably reproducible path and is what's recommended for actual
 deployment.
 
+### Option C — cross-build via Docker (recommended if you want a cross-build)
+
+Requires only Docker Desktop (with buildx, included by default) — no
+locally-installed cross toolchain at all. It uses Docker's QEMU-based
+emulation to run an actual armv7 Linux container and do an ordinary
+*native* `go build` inside it (see [Dockerfile](Dockerfile)), which sidesteps
+both the cross-compiler-naming issues in Option B and, more importantly,
+the risk of linking against a newer glibc than your Pi OS actually ships
+(a generic cross toolchain built for a different glibc baseline can
+produce a binary that fails on the Pi with `GLIBC_x.xx not found`; this
+approach links against the container's own glibc, which you can pin to
+match your Pi OS version via the base image tag in the Dockerfile).
+
+```
+make build-pi-docker   # -> bin/songlistener-linux-arm
+```
+
+Trade-off versus Option B: QEMU emulation makes the build itself slower
+(a couple of minutes rather than seconds), which is a fine trade for an
+occasional deploy build.
+
 ## Deploying to the Raspberry Pi
 
-1. Build (Option A or B above) or copy a prebuilt `bin/songlistener-linux-arm`
+1. Build (Option A, B, or C above) or copy a prebuilt `bin/songlistener-linux-arm`
    to the Pi.
 2. Copy `songs.txt` (or your real song list) to the Pi.
 3. Build whisper.cpp *on the Pi* (same cmake steps as the Mac section
