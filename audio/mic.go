@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/gen2brain/malgo"
@@ -64,12 +65,13 @@ func (m *MicSource) Stream(ctx context.Context) (<-chan []float32, error) {
 		}
 	}
 
-	// find device
+	// get devices
 	devices, err := malgo.Context(m.malgoCtx.Context).Devices(malgo.Capture)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate capture devices: %w", err)
 	}
 
+	// find clarett 4pre
 	var clarett *malgo.DeviceInfo
 	for _, d := range devices {
 		if strings.Contains(strings.ToLower(d.Name()), "clarett 4pre") {
