@@ -105,7 +105,7 @@ Flags:`)
 	fs.Float64Var(&cfg.marginThreshold, "margin-threshold", matcher.DefaultConfig().MarginThreshold, "minimum score margin over the second-best candidate required")
 
 	// slide show flags
-	fs.StringVar(&cfg.slideShowParentDir, "slideshow-dir", path.Join("/", "media", "pi", "CE", "CEAI"), "parent directory for slideshow images")
+	fs.StringVar(&cfg.slideShowParentDir, "slideshow-dir", path.Join("/", "media", "admin", "8.0 GB Volume", "CEAI"), "parent directory for slideshow images")
 	fs.IntVar(&cfg.defaultLogoFrequency, "slideshow-logo-frequency", 5, "insert logo after every X images")
 	fs.IntVar(&cfg.defaultInterval, "slideshow-interval", 7, "seconds between slides")
 

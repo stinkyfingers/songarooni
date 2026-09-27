@@ -9,3 +9,4 @@ songs.txt
 .env
 .DS_Store
 CLAUDE.md
+*.zip

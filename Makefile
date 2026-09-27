@@ -44,10 +44,14 @@ build-pi-cross:
 
 # Cross-build for a Raspberry Pi 3 (32-bit, armv7) using Docker Buildx's
 # QEMU emulation (see Dockerfile): runs an ordinary native `go build`
-# inside a real armv7 Linux container, avoiding both the cross-compiler
-# naming issues above and the risk of linking against a newer glibc than
-# your actual Pi OS ships. Requires Docker Desktop (buildx included).
-# Produces $(BIN_DIR)/songlistener-linux-arm.
+# inside a real armv7 Linux container, avoiding the cross-compiler naming
+# issues above. It also bundles its own glibc alongside a wrapper script
+# (see docker/pi-wrapper.sh), so it runs regardless of which Raspberry Pi
+# OS release/glibc version the Pi actually has. Requires Docker Desktop
+# (buildx included). Produces $(BIN_DIR)/$(BINARY)-linux-arm (a wrapper
+# script), $(BINARY)-linux-arm.bin (the real binary), and lib/ (its
+# bundled libraries) — copy all three to the Pi together and run the
+# wrapper script.
 build-pi-docker:
 	mkdir -p $(BIN_DIR)
 	docker buildx build --platform linux/arm/v7 --target export --output type=local,dest=$(BIN_DIR) .

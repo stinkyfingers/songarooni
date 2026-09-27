@@ -282,17 +282,29 @@ deployment.
 Requires only Docker Desktop (with buildx, included by default) — no
 locally-installed cross toolchain at all. It uses Docker's QEMU-based
 emulation to run an actual armv7 Linux container and do an ordinary
-*native* `go build` inside it (see [Dockerfile](Dockerfile)), which sidesteps
-both the cross-compiler-naming issues in Option B and, more importantly,
-the risk of linking against a newer glibc than your Pi OS actually ships
-(a generic cross toolchain built for a different glibc baseline can
-produce a binary that fails on the Pi with `GLIBC_x.xx not found`; this
-approach links against the container's own glibc, which you can pin to
-match your Pi OS version via the base image tag in the Dockerfile).
+*native* `go build` inside it (see [Dockerfile](Dockerfile)), which
+sidesteps the cross-compiler-naming issues in Option B entirely.
+
+It also **bundles its own glibc** (the dynamic loader, `libc.so.6`, and
+`libm.so.6`, copied from the build image) alongside a small wrapper
+script ([docker/pi-wrapper.sh](docker/pi-wrapper.sh)) that runs the real
+binary against those bundled libraries explicitly. That's what avoids
+`GLIBC_x.xx not found` on a Raspberry Pi OS release with an older glibc
+than the build image's — glibc is forward-compatible (a newer `libc.so.6`
+still satisfies programs built against older symbol versions), so this
+works regardless of which Raspberry Pi OS release/glibc version your Pi
+actually has, with no need to match the Dockerfile's base image to it.
 
 ```
-make build-pi-docker   # -> bin/songlistener-linux-arm
+make build-pi-docker
 ```
+
+produces three things in `bin/`, which must be copied to the Pi
+**together** (the wrapper script finds the other two next to itself):
+
+- `songarooni-linux-arm` — the wrapper script; this is what you run
+- `songarooni-linux-arm.bin` — the real binary
+- `lib/` — its bundled glibc
 
 Trade-off versus Option B: QEMU emulation makes the build itself slower
 (a couple of minutes rather than seconds), which is a fine trade for an
@@ -300,15 +312,17 @@ occasional deploy build.
 
 ## Deploying to the Raspberry Pi
 
-1. Build (Option A, B, or C above) or copy a prebuilt `bin/songlistener-linux-arm`
-   to the Pi.
+1. Build (Option A, B, or C above) and copy the result to the Pi:
+   - Option A/B: a single `bin/songarooni-linux-arm` file.
+   - Option C: `bin/songarooni-linux-arm`, `bin/songarooni-linux-arm.bin`,
+     and `bin/lib/`, kept together in the same directory.
 2. Copy `songs.txt` (or your real song list) to the Pi.
 3. Build whisper.cpp *on the Pi* (same cmake steps as the Mac section
    above — whisper.cpp is a native binary too, and needs to match the
    Pi's architecture) and download the `tiny.en` model there.
 4. Run:
    ```
-   ./songlistener-linux-arm \
+   ./songarooni-linux-arm \
      --songs songs.txt \
      --model ~/whisper.cpp/models/ggml-tiny.en.bin \
      --whisper-bin ~/whisper.cpp/build/bin/whisper-cli \
