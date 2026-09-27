@@ -64,6 +64,26 @@ func (m *MicSource) Stream(ctx context.Context) (<-chan []float32, error) {
 		}
 	}
 
+	// find device
+	devices, err := malgo.Context(m.malgoCtx.Context).Devices(malgo.Capture)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate capture devices: %w", err)
+	}
+
+	var clarett *malgo.DeviceInfo
+	for _, d := range devices {
+		if strings.Contains(strings.ToLower(d.Name()), "clarett 4pre") {
+			clarett = &d
+			break
+		}
+	}
+
+	if clarett == nil {
+		return nil, fmt.Errorf("Clarett 4Pre capture device not found")
+	}
+
+	deviceConfig.Capture.DeviceID = clarett.ID.Pointer()
+
 	device, err := malgo.InitDevice(m.malgoCtx.Context, deviceConfig, malgo.DeviceCallbacks{Data: onRecvFrames})
 	if err != nil {
 		return nil, fmt.Errorf("init capture device: %w", err)
