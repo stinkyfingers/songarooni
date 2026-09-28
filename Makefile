@@ -54,7 +54,7 @@ build-pi-cross:
 # wrapper script.
 build-pi-docker:
 	mkdir -p $(BIN_DIR)
-	docker buildx build --platform linux/arm/v7 --target export --output type=local,dest=$(BIN_DIR) .
+	docker buildx build --platform linux/arm64 --target export --output type=local,dest=$(BIN_DIR) .
 
 # Convenience target for tuning the matcher: make run-text TEXT="..."
 run-text:

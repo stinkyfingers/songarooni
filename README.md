@@ -373,3 +373,13 @@ songlistener --songs songs.txt --model models/ggml-tiny.en.bin \
   of a noisy room (with no song announcements) through `--audio` and
   confirm `--score-threshold`/`--margin-threshold` are conservative
   enough that nothing fires — false positives are worse than silence.
+
+
+## whisper on pi
+
+We don't want to hammer the pi with all cores.
+On pi, in the whisper.cpp dir:
+
+`cmake --build build -j2`
+
+** moving this to docker

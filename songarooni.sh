@@ -13,7 +13,7 @@ set -e
 dir=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 cd "$dir"
 
-exec ./bin/songarooni-linux-arm \
+exec ./bin/songarooni-linux-arm64 \
     --songs songs.txt \
     --model whisper.cpp/models/ggml-base.en.bin \
     --whisper-bin ./whisper.cpp/build/bin/whisper-cli \

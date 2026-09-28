@@ -1,46 +1,33 @@
-# Cross-builds the Raspberry Pi (armv7) binary using Docker's QEMU-based
-# emulation: the whole build stage runs as an ordinary *native* `go build`
-# inside a real armv7 Linux container, so there's no macOS-hosted cross
-# compiler to get right (see README.md for the alternative brew-based
-# cross toolchain).
+# Cross-builds the Raspberry Pi (ARM64) binary using Docker's QEMU-based
+# emulation. The whole build stage runs inside a real ARM64 Linux
+# container, so Go, CGO, miniaudio, and whisper.cpp are all built for
+# Linux ARM64.
 #
-# The output also bundles its own glibc (the dynamic loader, libc.so.6,
-# and libm.so.6, copied from this build image) alongside a small wrapper
-# script that runs the real binary against those bundled libraries
-# explicitly, instead of whatever glibc happens to be installed on the
-# target Pi. That's what avoids "GLIBC_x.xx not found" on a Raspberry Pi
-# OS release with an older glibc than this build image's (Bookworm,
-# glibc 2.36): glibc is forward-compatible (a newer libc.so.6 still
-# satisfies programs built against older symbol versions), so shipping
-# ours and forcing its use works regardless of the Pi's own OS version.
-# Verified by running the resulting bundle inside a `debian:buster-slim`
-# (glibc 2.28) container with no Go/build tooling installed at all.
-#
-# Note: the ELF interpreter path (PT_INTERP) can't be relative/
-# $ORIGIN-based — the kernel resolves it literally, before any dynamic
-# linking happens — which is why this ships a wrapper script that
-# invokes the bundled loader explicitly (see docker/pi-wrapper.sh)
-# instead of patching the real binary's own interpreter.
-#
-# Build (see `make build-pi-docker`, which wraps this):
-#   docker buildx build --platform linux/arm/v7 --target export \
+# Build:
+#   docker buildx build --platform linux/arm64 --target export \
 #       --output type=local,dest=bin .
-#
-# Deploy: copy the whole output directory to the Pi (the wrapper
-# script, the .bin binary, and lib/, kept together) and run the wrapper
-# script — it finds its own lib/ directory next to itself.
 FROM debian:bookworm-slim AS build
+RUN uname -m && dpkg --print-architecture
 
 # Pin to match go.mod's `go` directive.
 ARG GO_VERSION=1.24.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gcc libc6-dev \
+        ca-certificates curl gcc libc6-dev libasound2-dev cmake git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Official Go release for 32-bit ARM. Go's "armv6l" build covers both
-# armv6 (Pi 1/Zero) and armv7 (Pi 2/3/4) hardware.
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-armv6l.tar.gz" -o /tmp/go.tar.gz \
+## whisper
+
+RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git /whisper.cpp
+
+RUN cmake -S /whisper.cpp -B /whisper.cpp/build \
+    -DWHISPER_BUILD_TESTS=OFF \
+    -DWHISPER_BUILD_EXAMPLES=ON
+
+RUN cmake --build /whisper.cpp/build -j2
+
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz" \
+    -o /tmp/go.tar.gz \
     && tar -C /usr/local -xzf /tmp/go.tar.gz \
     && rm /tmp/go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
@@ -65,11 +52,29 @@ RUN set -eux; \
         | sort -u \
         | xargs -I{} cp -L {} /out/lib/
 
-COPY docker/pi-wrapper.sh /out/songarooni-linux-arm
-RUN chmod +x /out/songarooni-linux-arm
 
 # Minimal stage so `docker buildx --output type=local` can export just
 # the build's output (wrapper script + binary + bundled libs), without
 # pulling the whole build image along with it.
+
+# Put whisper-cli where the Go program expects it.
+RUN mkdir -p /out/whisper.cpp/build/bin \
+    && cp /whisper.cpp/build/bin/whisper-cli \
+       /out/whisper.cpp/build/bin/whisper-cli
+
+# Bundle the shared libraries required by both the Go binary and whisper-cli.
+RUN set -eux; \
+    mkdir -p /out/lib; \
+    ( \
+        ldd /out/songarooni-linux-arm.bin; \
+        ldd /out/whisper.cpp/build/bin/whisper-cli; \
+    ) \
+        | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i }' \
+        | sort -u \
+        | xargs -I{} cp -L {} /out/lib/
+
+COPY docker/pi-wrapper.sh /out/songarooni-linux-arm64
+RUN chmod +x /out/songarooni-linux-arm64
+
 FROM scratch AS export
 COPY --from=build /out/ /

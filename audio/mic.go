@@ -1,3 +1,5 @@
+//go:build !linux
+
 package audio
 
 import (
@@ -74,6 +76,7 @@ func (m *MicSource) Stream(ctx context.Context) (<-chan []float32, error) {
 	// find clarett 4pre
 	var clarett *malgo.DeviceInfo
 	for _, d := range devices {
+		fmt.Println("device: ", d.Name())
 		if strings.Contains(strings.ToLower(d.Name()), "clarett 4pre") {
 			clarett = &d
 			break
