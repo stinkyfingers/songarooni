@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/gen2brain/malgo"
@@ -25,9 +24,10 @@ import (
 type MicSource struct {
 	sampleRate int
 
-	mu       sync.Mutex
-	malgoCtx *malgo.AllocatedContext
-	device   *malgo.Device
+	mu         sync.Mutex
+	malgoCtx   *malgo.AllocatedContext
+	deviceInfo *malgo.DeviceInfo
+	device     *malgo.Device
 }
 
 // NewMicSource opens the default capture device at sampleRate, mono.
@@ -37,6 +37,20 @@ func NewMicSource(sampleRate int) (*MicSource, error) {
 		return nil, fmt.Errorf("init audio context: %w", err)
 	}
 	return &MicSource{sampleRate: sampleRate, malgoCtx: malgoCtx}, nil
+}
+
+func (m *MicSource) GetDevices() ([]malgo.DeviceInfo, error) {
+	devices, err := malgo.Context(m.malgoCtx.Context).Devices(malgo.Capture)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate capture devices: %w", err)
+	}
+	return devices, nil
+}
+
+func (m *MicSource) SetDeviceInfo(deviceInfo *malgo.DeviceInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deviceInfo = deviceInfo
 }
 
 func (m *MicSource) SampleRate() int { return m.sampleRate }
@@ -67,27 +81,11 @@ func (m *MicSource) Stream(ctx context.Context) (<-chan []float32, error) {
 		}
 	}
 
-	// get devices
-	devices, err := malgo.Context(m.malgoCtx.Context).Devices(malgo.Capture)
-	if err != nil {
-		return nil, fmt.Errorf("enumerate capture devices: %w", err)
+	if m.deviceInfo == nil {
+		return nil, fmt.Errorf("no capture device selected")
 	}
 
-	// find clarett 4pre
-	var clarett *malgo.DeviceInfo
-	for _, d := range devices {
-		fmt.Println("device: ", d.Name())
-		if strings.Contains(strings.ToLower(d.Name()), "clarett 4pre") {
-			clarett = &d
-			break
-		}
-	}
-
-	if clarett == nil {
-		return nil, fmt.Errorf("Clarett 4Pre capture device not found")
-	}
-
-	deviceConfig.Capture.DeviceID = clarett.ID.Pointer()
+	deviceConfig.Capture.DeviceID = m.deviceInfo.ID.Pointer()
 
 	device, err := malgo.InitDevice(m.malgoCtx.Context, deviceConfig, malgo.DeviceCallbacks{Data: onRecvFrames})
 	if err != nil {

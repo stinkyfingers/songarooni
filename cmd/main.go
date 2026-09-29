@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -186,9 +187,6 @@ func run() error {
 	}()
 
 	matchHandler := func(event app.MatchEvent) {
-		if event.Title != "" {
-			logger.Printf("KABOOM MATCH: %s (score %.2f)", event.Title, event.Score)
-		}
 		// Non-blocking: the slideshow is a best-effort side effect and
 		// must never be able to stall song recognition (or shutdown) —
 		// e.g. if its goroutine exited (missing --slideshow-dir) or is
@@ -267,6 +265,28 @@ func runLiveMode(cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognize
 	}
 	defer mic.Close()
 
+	// device selection
+	devices, err := mic.GetDevices()
+	if err != nil {
+		return fmt.Errorf("get devices: %w", err)
+	}
+	logger.Println("Select device:")
+	for i, d := range devices {
+		logger.Printf("  %d: %s", i, d.Name())
+	}
+	// get user input
+	deviceIndex, err := userInput("Enter device number: ")
+	if err != nil {
+		return fmt.Errorf("read device number: %w", err)
+	}
+	if deviceIndex < 0 || deviceIndex >= len(devices) {
+		return fmt.Errorf("invalid device number %d", deviceIndex)
+	}
+	logger.Printf("Using device %d: %s", deviceIndex, devices[deviceIndex].Name())
+	mic.SetDeviceInfo(&devices[deviceIndex])
+
+	// end device selection
+
 	pipeline := &app.Pipeline{
 		Source:     mic,
 		Segmenter:  audio.NewSegmenter(vadConfigFrom(cfg, cfg.sampleRate)),
@@ -324,3 +344,17 @@ func splitArgs(s string) []string {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func userInput(prompt string) (int, error) {
+	fmt.Print(prompt)
+	var input string
+	_, err := fmt.Scanln(&input)
+	if err != nil {
+		return 0, err
+	}
+	value, err := strconv.Atoi(input)
+	if err != nil {
+		return 0, err
+	}
+	return value, nil
+}

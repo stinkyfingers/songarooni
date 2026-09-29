@@ -119,7 +119,6 @@ func (p *Pipeline) handleSegment(ctx context.Context, seg audio.Segment, logger 
 
 	logger.Println()
 	logger.Printf("MATCH: %s\n", result.Best.Title)
-	fmt.Printf("SONG_MATCH: %s\n", result.Best.Title)
 
 	if p.OnMatch != nil {
 		p.OnMatch(MatchEvent{
