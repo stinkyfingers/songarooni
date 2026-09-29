@@ -8,7 +8,7 @@ all: build test vet
 
 build:
 	mkdir -p $(BIN_DIR)
-	go build -o $(BIN_DIR)/$(BINARY) $(CMD)
+	go build -o $(BIN_DIR)/$(BINARY)-osx $(CMD)
 
 test:
 	go test ./...
