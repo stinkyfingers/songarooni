@@ -242,103 +242,101 @@ via `--audio` to dial these in before the show.
 ## Building for Raspberry Pi
 
 **CGO is required** for this project, because microphone capture
-(`internal/audio/mic.go`) uses malgo/miniaudio, which is C. Plain
-`GOOS=linux GOARCH=arm GOARM=7 go build` will *not* work for a full build
+(`audio/mic.go`) uses malgo/miniaudio, which is C. Plain
+`GOOS=linux GOARCH=arm64 go build` will *not* work for a full build
 without a matching cross-compiling C toolchain — pretending otherwise
 would just fail on the Pi.
 
-Three options:
+Target: a 64-bit Raspberry Pi OS (arm64). Two options:
 
-### Option A — build natively on the Pi (recommended)
-
-Raspberry Pi OS ships a C compiler, so this "just works" and avoids any
-cross-toolchain fragility:
-
-```
-# on the Pi, with Go installed and this repo copied over:
-make build-pi-native   # -> bin/songlistener-linux-arm
-```
-
-### Option B — cross-compile from macOS (best effort)
-
-Requires an `arm-linux-gnueabihf` CGO cross toolchain, e.g.:
-
-```
-brew install messense/macos-cross-toolchains/arm-unknown-linux-gnueabihf
-```
-
-then:
-
-```
-make build-pi-cross    # -> bin/songlistener-linux-arm
-```
-
-If this toolchain setup gives you trouble, fall back to Option A — it's
-the more reliably reproducible path and is what's recommended for actual
-deployment.
-
-### Option C — cross-build via Docker (recommended if you want a cross-build)
+### Option A — cross-build everything via Docker (recommended)
 
 Requires only Docker Desktop (with buildx, included by default) — no
 locally-installed cross toolchain at all. It uses Docker's QEMU-based
-emulation to run an actual armv7 Linux container and do an ordinary
-*native* `go build` inside it (see [Dockerfile](Dockerfile)), which
-sidesteps the cross-compiler-naming issues in Option B entirely.
+emulation to run an actual ARM64 Linux container and do ordinary
+*native* builds inside it — both `go build` and whisper.cpp's own cmake
+build (see [Dockerfile](Dockerfile)) — so there's no cross-compiler to
+get right for either one.
 
-It also **bundles its own glibc** (the dynamic loader, `libc.so.6`, and
-`libm.so.6`, copied from the build image) alongside a small wrapper
-script ([docker/pi-wrapper.sh](docker/pi-wrapper.sh)) that runs the real
-binary against those bundled libraries explicitly. That's what avoids
-`GLIBC_x.xx not found` on a Raspberry Pi OS release with an older glibc
-than the build image's — glibc is forward-compatible (a newer `libc.so.6`
-still satisfies programs built against older symbol versions), so this
-works regardless of which Raspberry Pi OS release/glibc version your Pi
-actually has, with no need to match the Dockerfile's base image to it.
+It also **builds whisper.cpp from source and bundles it**, model
+included, alongside its own glibc (the dynamic loader, `libc.so.6`, and
+`libm.so.6`, copied from the build image, plus whisper.cpp's own
+`libggml*.so`/`libwhisper.so`). Both the `songarooni` binary and
+`whisper-cli` are installed behind a small generic wrapper script
+([docker/pi-wrapper.sh](docker/pi-wrapper.sh)) that runs the real binary
+against those bundled libraries explicitly, instead of whatever glibc is
+installed on the Pi. That's what avoids `GLIBC_x.xx not found` on a
+Raspberry Pi OS release with an older glibc than the build image's —
+glibc is forward-compatible (a newer `libc.so.6` still satisfies programs
+built against older symbol versions), so this works regardless of which
+Raspberry Pi OS release/glibc version your Pi actually has, with no need
+to match the Dockerfile's base image to it.
 
 ```
 make build-pi-docker
 ```
 
-produces three things in `bin/`, which must be copied to the Pi
-**together** (the wrapper script finds the other two next to itself):
+produces, in `bin/` (wiped and rewritten fresh on every run, so a
+previous build's files never linger):
 
-- `songarooni-linux-arm` — the wrapper script; this is what you run
-- `songarooni-linux-arm.bin` — the real binary
-- `lib/` — its bundled glibc
+- `songarooni-linux-arm64` — wrapper script; this is what you run
+- `songarooni-linux-arm64.bin` — the real binary
+- `whisper-cli` / `whisper-cli.bin` — same wrapper pattern, for whisper.cpp
+- `models/ggml-base.en.bin` — the bundled model (`ARG WHISPER_MODEL` in
+  the Dockerfile controls which one; must match `songarooni.sh`'s
+  `--model` flag)
+- `lib/` — the shared glibc all of the above run against
 
-Trade-off versus Option B: QEMU emulation makes the build itself slower
-(a couple of minutes rather than seconds), which is a fine trade for an
-occasional deploy build.
+Trade-off: QEMU emulation makes the build itself slower (whisper.cpp's
+own build included, a couple of minutes total), which is a fine trade for
+an occasional deploy build.
+
+### Option B — build natively on the Pi (fallback)
+
+Raspberry Pi OS ships a C compiler, so this "just works" and avoids any
+cross-toolchain/emulation fragility, at the cost of needing to also build
+whisper.cpp yourself on the Pi (see the Mac dev setup section above — the
+steps are the same, just run there instead):
+
+```
+# on the Pi, with Go installed and this repo copied over:
+make build-pi-native   # -> bin/songarooni-linux-arm
+```
 
 ## Deploying to the Raspberry Pi
 
-1. Build (Option A, B, or C above) and copy the result to the Pi:
-   - Option A/B: a single `bin/songarooni-linux-arm` file.
-   - Option C: `bin/songarooni-linux-arm`, `bin/songarooni-linux-arm.bin`,
-     and `bin/lib/`, kept together in the same directory.
-2. Copy `songs.txt` (or your real song list) to the Pi.
-3. Build whisper.cpp *on the Pi* (same cmake steps as the Mac section
-   above — whisper.cpp is a native binary too, and needs to match the
-   Pi's architecture) and download the `tiny.en` model there.
-4. Run:
-   ```
-   ./songarooni-linux-arm \
-     --songs songs.txt \
-     --model ~/whisper.cpp/models/ggml-tiny.en.bin \
-     --whisper-bin ~/whisper.cpp/build/bin/whisper-cli \
-     --threads 4
-   ```
+The easiest path is [package.sh](package.sh) end to end:
+
+1. `make build-pi-docker` (Option A above).
+2. `./package.sh` — zips `bin/`, `songs.txt`, and `songarooni.sh` into
+   `songarooni.zip` and copies it to your Desktop.
+3. Move the zip to the Pi (thumb drive, `scp`, etc.) and unzip it at
+   `$HOME` (e.g. `~/songarooni/`) — `bin/`, `songs.txt`, and
+   `songarooni.sh` should end up as siblings there.
+4. Run `./songarooni.sh` (see its comments for passing extra flags, e.g.
+   `--slideshow-dir`).
+
+If you built with Option B instead, copy `bin/songarooni-linux-arm` plus
+your own whisper.cpp build/model to the Pi and invoke it directly:
+
+```
+./songarooni-linux-arm \
+  --songs songs.txt \
+  --model ~/whisper.cpp/models/ggml-tiny.en.bin \
+  --whisper-bin ~/whisper.cpp/build/bin/whisper-cli \
+  --threads 4
+```
 
 ## Example CLI commands
 
 ```
-songlistener --help
+songarooni --help
 
-songlistener --songs songs.txt --text "this one's take it easy"
+songarooni --songs songs.txt --text "this one's take it easy"
 
-songlistener --songs songs.txt --model models/ggml-tiny.en.bin --audio test.wav
+songarooni --songs songs.txt --model models/ggml-tiny.en.bin --audio test.wav
 
-songlistener --songs songs.txt --model models/ggml-tiny.en.bin \
+songarooni --songs songs.txt --model models/ggml-tiny.en.bin \
   --whisper-bin whisper.cpp/build/bin/whisper-cli \
   --vad-energy-threshold 0.03 --vad-silence-ms 400 \
   --score-threshold 0.8 --margin-threshold 0.1
@@ -373,13 +371,3 @@ songlistener --songs songs.txt --model models/ggml-tiny.en.bin \
   of a noisy room (with no song announcements) through `--audio` and
   confirm `--score-threshold`/`--margin-threshold` are conservative
   enough that nothing fires — false positives are worse than silence.
-
-
-## whisper on pi
-
-We don't want to hammer the pi with all cores.
-On pi, in the whisper.cpp dir:
-
-`cmake --build build -j2`
-
-** moving this to docker
