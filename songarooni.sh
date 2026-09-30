@@ -15,6 +15,6 @@ cd "$dir"
 
 exec ./bin/songarooni-linux-arm64 \
     --songs songs.txt \
-    --model ./bin/models/ggml-base.en.bin \
+    --model ./bin/models/ggml-tiny.en.bin \
     --whisper-bin ./bin/whisper-cli \
     "$@"

@@ -14,10 +14,6 @@ import (
 )
 
 var (
-	// defaultDrive         = path.Join("/", "media", "pi", "CE", "CEAI")
-	// defaultLogoFrequency = "5" // Insert logo after every x images
-	// defaultInterval      = "7" // Seconds between slides
-
 	//go:embed logo.png
 	embeddedLogo []byte
 )
@@ -139,7 +135,7 @@ func (p *player) stopLocked() {
 // fehArgs builds the feh CLI arguments for playing playlistPath on a
 // fixed interval.
 func fehArgs(playlistPath string, interval float64) []string {
-	return []string{
+	args := []string{
 		"-F",                                // fullscreen
 		"-Z",                                // auto-zoom
 		"-D", fmt.Sprintf("%.1f", interval), // slide delay
@@ -147,6 +143,7 @@ func fehArgs(playlistPath string, interval float64) []string {
 		"--quiet",                  // suppress warnings
 		"--filelist", playlistPath, // read filepaths from file
 	}
+	return args
 }
 
 func getSlides(imgDir, logoPath string, logoFrequency int) (*os.File, error) {

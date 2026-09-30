@@ -31,7 +31,7 @@ FROM debian:bookworm-slim AS build
 # Pin to match go.mod's `go` directive.
 ARG GO_VERSION=1.24.2
 # Must match songarooni.sh's --model flag.
-ARG WHISPER_MODEL=base.en
+ARG WHISPER_MODEL=tiny.en
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gcc libc6-dev libasound2-dev cmake git build-essential \

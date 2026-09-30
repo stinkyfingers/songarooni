@@ -8,8 +8,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"time"
 
 	"songarooni/audio"
 	"songarooni/matcher"
@@ -46,6 +48,11 @@ type Pipeline struct {
 	Logger *log.Logger
 }
 
+var (
+	logAudioLevelFreq  = time.Second * 5
+	verboseAudioLevels = false
+)
+
 // Run streams audio from Source, and for every speech segment the
 // Segmenter emits, transcribes it and attempts a song match, logging
 // progress and emitting SONG_MATCH lines to stdout as described in
@@ -63,6 +70,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	logger.Println("Listening...")
+	if verboseAudioLevels {
+		samples = logAudioLevels(ctx, logger, samples) // enable to log levels
+	}
 	segments := p.Segmenter.Run(ctx, samples)
 
 	for {
@@ -76,6 +86,61 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			p.handleSegment(ctx, seg, logger)
 		}
 	}
+}
+
+// logAudioLevels passes samples through unchanged, but once a second logs
+// the RMS level captured over that second. It exists to make a "no
+// speech ever detected" report diagnosable without extra tooling: a
+// level that stays near zero points at a routing/gain problem upstream
+// of this program (wrong ALSA channel/device, muted or zero mixer gain);
+// a small but nonzero, consistent level that never trips VAD points at
+// --vad-energy-threshold being set too high for the real signal instead.
+func logAudioLevels(ctx context.Context, logger *log.Logger, in <-chan []float32) <-chan []float32 {
+	out := make(chan []float32)
+
+	go func() {
+		defer close(out)
+
+		var sumSquares float64
+		var count int
+		report := func() {
+			if count == 0 {
+				logger.Println("audio level: no samples received in the last second")
+				return
+			}
+			rms := math.Sqrt(sumSquares / float64(count))
+			logger.Printf("audio level: rms=%.4f (compare against --vad-energy-threshold)", rms)
+			sumSquares, count = 0, 0
+		}
+
+		ticker := time.NewTicker(logAudioLevelFreq)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-in:
+				if !ok {
+					report()
+					return
+				}
+				for _, s := range chunk {
+					sumSquares += float64(s) * float64(s)
+				}
+				count += len(chunk)
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
+			case <-ticker.C:
+				report()
+			}
+		}
+	}()
+
+	return out
 }
 
 func (p *Pipeline) handleSegment(ctx context.Context, seg audio.Segment, logger *log.Logger) {
