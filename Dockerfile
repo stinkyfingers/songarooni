@@ -4,16 +4,21 @@
 # ordinary *native* builds (`go build`, whisper.cpp's own cmake build),
 # so there's no cross-compiler to get right for either of them.
 #
-# The output also bundles its own glibc (the dynamic loader, libc.so.6,
-# and libm.so.6, copied from this build image) for BOTH the songarooni
-# binary and whisper-cli, each installed behind a small generic wrapper
-# script (docker/pi-wrapper.sh) that runs the real binary against those
-# bundled libs explicitly, instead of whatever glibc is installed on the
-# Pi. That's what avoids "GLIBC_x.xx not found" on a Raspberry Pi OS
-# release with an older glibc than this build image's (Bookworm, glibc
-# 2.36): glibc is forward-compatible (a newer libc.so.6 still satisfies
-# programs built against older symbol versions), so shipping ours and
-# forcing its use works regardless of the Pi's own OS version.
+# whisper-cli (C++, dynamically linked) also gets its own glibc bundled
+# (the dynamic loader, libc.so.6, libstdc++.so.6, the ggml/whisper
+# libs, ...) behind a small generic wrapper script (docker/pi-wrapper.sh)
+# that runs the real binary against those bundled libs explicitly,
+# instead of whatever glibc is installed on the Pi. That's what avoids
+# "GLIBC_x.xx not found" on a Raspberry Pi OS release with an older
+# glibc than this build image's (Bookworm, glibc 2.36): glibc is
+# forward-compatible (a newer libc.so.6 still satisfies programs built
+# against older symbol versions), so shipping ours and forcing its use
+# works regardless of the Pi's own OS version.
+#
+# The songarooni binary itself needs none of this: it's pure Go (no CGO
+# — microphone capture shells out to `arecord` rather than linking
+# against ALSA, see audio/mic_linux.go for why) and so builds fully
+# statically linked, with zero runtime library dependencies of its own.
 #
 # Note: the ELF interpreter path (PT_INTERP) can't be relative/
 # $ORIGIN-based — the kernel resolves it literally, before any dynamic
@@ -34,7 +39,7 @@ ARG GO_VERSION=1.24.2
 ARG WHISPER_MODEL=tiny.en
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gcc libc6-dev libasound2-dev cmake git build-essential \
+        ca-certificates curl gcc libc6-dev cmake git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # whisper.cpp: built from source, natively for this container's own
@@ -68,34 +73,32 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-# CGO is required (mic capture uses malgo/miniaudio) and is on by default
-# here since gcc is present; this is a native build for the container's
-# own architecture, so no CC/GOARCH cross-compile flags are needed.
-RUN go build -o /out/songarooni-linux-arm64.bin ./cmd
+# Statically linked (no CGO — see above), so this is the final artifact
+# as-is; no wrapper/bundled libs needed for it.
+RUN go build -o /out/songarooni-linux-arm64 ./cmd
 
 # Flatten whisper.cpp's output into the same directory as everything
 # else, rather than preserving its internal build/bin/ nesting — that
-# keeps every wrapper script's "the bundled lib/ is my sibling"
-# assumption simple, and matches the flat paths songarooni.sh expects.
+# keeps the wrapper script's "the bundled lib/ is my sibling" assumption
+# simple, and matches the flat paths songarooni.sh expects.
 RUN cp /whisper.cpp/build/bin/whisper-cli /out/whisper-cli.bin
 RUN mkdir -p /out/models \
     && cp "/whisper.cpp/models/ggml-${WHISPER_MODEL}.bin" /out/models/
 
-# Bundle every shared library either binary needs (this skips the
+# Bundle every shared library whisper-cli needs (this skips the
 # kernel-provided linux-vdso.so.1, which `ldd` lists but isn't a real
 # file to copy) plus the dynamic loader itself.
 RUN set -eux; \
     mkdir -p /out/lib; \
-    ( ldd /out/songarooni-linux-arm64.bin; ldd /out/whisper-cli.bin ) \
+    ldd /out/whisper-cli.bin \
         | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i }' \
         | sort -u \
         | xargs -I{} cp -L {} /out/lib/
 
-# Install both binaries behind the same generic wrapper script: each
-# copy execs "<its own name>.bin" against the bundled lib/ beside it.
-COPY docker/pi-wrapper.sh /out/songarooni-linux-arm64
+# Install whisper-cli behind the generic wrapper script, which execs
+# "<its own name>.bin" against the bundled lib/ beside it.
 COPY docker/pi-wrapper.sh /out/whisper-cli
-RUN chmod +x /out/songarooni-linux-arm64 /out/whisper-cli
+RUN chmod +x /out/whisper-cli
 
 # Minimal stage so `docker buildx --output type=local` can export just
 # the build's output, without pulling the whole build image along with it.

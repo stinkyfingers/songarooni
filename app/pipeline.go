@@ -45,12 +45,12 @@ type Pipeline struct {
 	// per plans/init.md.
 	OnMatch func(MatchEvent)
 
-	Logger *log.Logger
+	Logger     *log.Logger
+	AudioDebug bool
 }
 
 var (
-	logAudioLevelFreq  = time.Second * 5
-	verboseAudioLevels = false
+	logAudioLevelFreq = time.Second * 5
 )
 
 // Run streams audio from Source, and for every speech segment the
@@ -70,7 +70,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	logger.Println("Listening...")
-	if verboseAudioLevels {
+	if p.AudioDebug {
 		samples = logAudioLevels(ctx, logger, samples) // enable to log levels
 	}
 	segments := p.Segmenter.Run(ctx, samples)

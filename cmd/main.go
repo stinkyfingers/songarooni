@@ -39,8 +39,9 @@ type cliConfig struct {
 	threads    int
 	extraArgs  string
 
-	text  string
-	audio string
+	text       string
+	audio      string
+	audioDebug bool
 
 	sampleRate int
 
@@ -91,8 +92,9 @@ Flags:`)
 
 	fs.StringVar(&cfg.text, "text", "", "run only the matcher against this text and exit (no audio/whisper needed)")
 	fs.StringVar(&cfg.audio, "audio", "", "process a single prerecorded 16kHz mono WAV file and exit, instead of listening live")
+	fs.BoolVar(&cfg.audioDebug, "audio-debug", false, "log audio levels and prevent slideshow from starting, for debugging microphone input")
 
-	fs.IntVar(&cfg.sampleRate, "sample-rate", 44100, "microphone capture sample rate, in Hz (whisper.cpp expects 16kHz)")
+	fs.IntVar(&cfg.sampleRate, "sample-rate", 16000, "microphone capture sample rate, in Hz (whisper.cpp expects 16kHz)")
 
 	fs.IntVar(&cfg.vadFrameMS, "vad-frame-ms", 30, "VAD analysis frame size, in milliseconds")
 	fs.Float64Var(&cfg.vadEnergy, "vad-energy-threshold", 0.02, "RMS energy above which a frame is considered speech")
@@ -184,12 +186,18 @@ func run() error {
 	if err != nil {
 		logger.Printf("slideshow unavailable: %v", err)
 	} else {
-		go func() {
-			if err := sh.Run(ctx); err != nil {
-				logger.Printf("slideshow error: %v", err)
-			}
-		}()
-		matchHandler = func(event app.MatchEvent) { sh.Show(event.Title) }
+		// debug; no slideshow if audio debug is enabled, to avoid the user discovering
+		if cfg.audioDebug {
+			logger.Println("audio debug mode: slideshow disabled")
+			matchHandler = func(event app.MatchEvent) { logger.Printf("match: %s", event.Title) }
+		} else {
+			go func() {
+				if err := sh.Run(ctx); err != nil {
+					logger.Printf("slideshow error: %v", err)
+				}
+			}()
+			matchHandler = func(event app.MatchEvent) { sh.Show(event.Title) }
+		}
 	}
 
 	if cfg.audio != "" {
@@ -242,6 +250,7 @@ func runAudioFileMode(ctx context.Context, cfg *cliConfig, m *matcher.Matcher, r
 		Matcher:    m,
 		Logger:     logger,
 		OnMatch:    matchHandler,
+		AudioDebug: cfg.audioDebug,
 	}
 
 	return pipeline.Run(ctx)
@@ -270,6 +279,7 @@ func runLiveMode(ctx context.Context, cfg *cliConfig, m *matcher.Matcher, recogn
 		Matcher:    m,
 		Logger:     logger,
 		OnMatch:    matchHandler,
+		AudioDebug: cfg.audioDebug,
 	}
 
 	return pipeline.Run(ctx)
