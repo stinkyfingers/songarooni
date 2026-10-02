@@ -115,6 +115,16 @@ Flags:`)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	// validate slideshow flags
+	if cfg.defaultLogoFrequency <= 0 {
+		return nil, fmt.Errorf("--slideshow-logo-frequency must be > 0")
+	}
+	if cfg.defaultInterval <= 0 {
+		return nil, fmt.Errorf("--slideshow-interval must be > 0")
+	}
+	if cfg.modelPath == "" && cfg.text == "" {
+		return nil, fmt.Errorf("--model is required unless --text is used")
+	}
 	return cfg, nil
 }
 
@@ -130,13 +140,6 @@ func run() error {
 	logger := log.New(os.Stderr, "", 0)
 	if cfg.quiet {
 		logger.SetOutput(discardWriter{})
-	}
-
-	if cfg.defaultLogoFrequency <= 0 {
-		return fmt.Errorf("--slideshow-logo-frequency must be > 0")
-	}
-	if cfg.defaultInterval <= 0 {
-		return fmt.Errorf("--slideshow-interval must be > 0")
 	}
 
 	logger.Println("Loading song list...")
@@ -170,43 +173,34 @@ func run() error {
 		return fmt.Errorf("configure whisper.cpp: %w", err)
 	}
 
-	slideshowChan := make(chan string, 1)
-	quit := make(chan struct{})
-	syscallChan := make(chan os.Signal, 1)
-	signal.Notify(syscallChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-syscallChan
-		close(quit)
-	}()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
-	go func() {
-		slideShowErr := slideshow.Run(cfg.slideShowParentDir, cfg.defaultLogoFrequency, cfg.defaultInterval, slideshowChan, quit)
-		if slideShowErr != nil {
-			logger.Printf("Slideshow error: %v", slideShowErr)
-		}
-	}()
-
-	matchHandler := func(event app.MatchEvent) {
-		// Non-blocking: the slideshow is a best-effort side effect and
-		// must never be able to stall song recognition (or shutdown) —
-		// e.g. if its goroutine exited (missing --slideshow-dir) or is
-		// still busy handling the previous match.
-		select {
-		case slideshowChan <- event.Title:
-		default:
-			logger.Printf("slideshow busy or unavailable; dropped match for %q", event.Title)
-		}
+	// Slideshow is a best-effort, nice-to-have feature: if its directory
+	// is missing/misconfigured, log and continue without it rather than
+	// failing the whole program.
+	var matchHandler func(app.MatchEvent)
+	sh, err := slideshow.New(cfg.slideShowParentDir, cfg.defaultLogoFrequency, cfg.defaultInterval)
+	if err != nil {
+		logger.Printf("slideshow unavailable: %v", err)
+	} else {
+		go func() {
+			if err := sh.Run(ctx); err != nil {
+				logger.Printf("slideshow error: %v", err)
+			}
+		}()
+		matchHandler = func(event app.MatchEvent) { sh.Show(event.Title) }
 	}
 
 	if cfg.audio != "" {
-		if err = runAudioFileMode(cfg, m, recognizer, logger, matchHandler); err != nil {
+		if err = runAudioFileMode(ctx, cfg, m, recognizer, logger, matchHandler); err != nil {
 			return fmt.Errorf("audio file mode error: %w", err)
 		}
 		time.Sleep(time.Second)
 		return nil
 	}
 
-	if err = runLiveMode(cfg, m, recognizer, logger, matchHandler); err != nil {
+	if err = runLiveMode(ctx, cfg, m, recognizer, logger, matchHandler); err != nil {
 		return fmt.Errorf("live mode error: %w", err)
 	}
 	time.Sleep(time.Second)
@@ -229,7 +223,7 @@ func runTextMode(cfg *cliConfig, m *matcher.Matcher) error {
 // one prerecorded WAV file through VAD + whisper.cpp + the matcher, then
 // exits. Useful for development and regression testing without a live
 // microphone.
-func runAudioFileMode(cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognizer, logger *log.Logger, matchHandler func(app.MatchEvent)) error {
+func runAudioFileMode(ctx context.Context, cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognizer, logger *log.Logger, matchHandler func(app.MatchEvent)) error {
 	src, err := audio.NewWAVSource(cfg.audio, 0)
 	if err != nil {
 		return fmt.Errorf("load audio file: %w", err)
@@ -250,14 +244,12 @@ func runAudioFileMode(cfg *cliConfig, m *matcher.Matcher, recognizer speech.Reco
 		OnMatch:    matchHandler,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	return pipeline.Run(ctx)
 }
 
 // runLiveMode implements the default, continuous microphone-listening
 // behavior.
-func runLiveMode(cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognizer, logger *log.Logger, matchHandler func(app.MatchEvent)) error {
+func runLiveMode(ctx context.Context, cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognizer, logger *log.Logger, matchHandler func(app.MatchEvent)) error {
 	logger.Println("Opening microphone...")
 	mic, err := audio.NewMicSource(cfg.sampleRate)
 	if err != nil {
@@ -265,6 +257,38 @@ func runLiveMode(cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognize
 	}
 	defer mic.Close()
 
+	// device selection
+	err = selectDevice(mic, logger)
+	if err != nil {
+		return fmt.Errorf("select device: %w", err)
+	}
+
+	pipeline := &app.Pipeline{
+		Source:     mic,
+		Segmenter:  audio.NewSegmenter(vadConfigFrom(cfg, cfg.sampleRate)),
+		Recognizer: recognizer,
+		Matcher:    m,
+		Logger:     logger,
+		OnMatch:    matchHandler,
+	}
+
+	return pipeline.Run(ctx)
+}
+
+func vadConfigFrom(cfg *cliConfig, sampleRate int) audio.VADConfig {
+	return audio.VADConfig{
+		SampleRate:      sampleRate,
+		FrameMS:         cfg.vadFrameMS,
+		EnergyThreshold: cfg.vadEnergy,
+		MinSpeechMS:     cfg.vadMinSpeechMS,
+		SilenceMS:       cfg.vadSilenceMS,
+		MaxSegmentMS:    cfg.vadMaxSegmentMS,
+		PreRollMS:       cfg.vadPreRollMS,
+		PostRollMS:      cfg.vadPostRollMS,
+	}
+}
+
+func selectDevice(mic *audio.MicSource, logger *log.Logger) error {
 	// device selection
 	devices, err := mic.GetDevices()
 	if err != nil {
@@ -284,35 +308,7 @@ func runLiveMode(cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognize
 	}
 	logger.Printf("Using device %d: %s", deviceIndex, devices[deviceIndex].Name())
 	mic.SetDeviceInfo(&devices[deviceIndex])
-
-	// end device selection
-
-	pipeline := &app.Pipeline{
-		Source:     mic,
-		Segmenter:  audio.NewSegmenter(vadConfigFrom(cfg, cfg.sampleRate)),
-		Recognizer: recognizer,
-		Matcher:    m,
-		Logger:     logger,
-		OnMatch:    matchHandler,
-	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	return pipeline.Run(ctx)
-}
-
-func vadConfigFrom(cfg *cliConfig, sampleRate int) audio.VADConfig {
-	return audio.VADConfig{
-		SampleRate:      sampleRate,
-		FrameMS:         cfg.vadFrameMS,
-		EnergyThreshold: cfg.vadEnergy,
-		MinSpeechMS:     cfg.vadMinSpeechMS,
-		SilenceMS:       cfg.vadSilenceMS,
-		MaxSegmentMS:    cfg.vadMaxSegmentMS,
-		PreRollMS:       cfg.vadPreRollMS,
-		PostRollMS:      cfg.vadPostRollMS,
-	}
+	return nil
 }
 
 func printResult(logger *log.Logger, result matcher.Result) {

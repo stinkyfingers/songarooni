@@ -1,4 +1,4 @@
-# songlistener
+# songarooni
 
 Listens to a microphone (or line input, via a USB audio interface) during
 a live band performance, and identifies which song from a supplied list
@@ -7,47 +7,61 @@ for fully offline speech recognition and a fuzzy text matcher tolerant of
 imperfect transcription. See [plans/init.md](plans/init.md) for the full
 design brief this implements (phase 1).
 
-This covers phase 1 only: identifying the song. Phase 2 (slideshow
-playback via `feh` or similar) is not yet implemented.
+Phase 2 (slideshow playback via `feh`) is also implemented — see the
+`slideshow` package below — triggered off the same match event as phase 1.
 
 ## Architecture
 
 ```
 microphone/line-in
-  -> internal/audio  (capture + energy-based VAD segmentation)
-  -> internal/speech (whisper.cpp subprocess, per segment)
-  -> internal/matcher (fuzzy match transcript against song list)
-  -> internal/app     (wiring, logging, SONG_MATCH event)
+  -> audio     (capture + energy-based VAD segmentation)
+  -> speech    (whisper.cpp subprocess, per segment)
+  -> matcher   (fuzzy match transcript against song list)
+  -> app       (wiring, logging, match event)
+       -> slideshow (feh, keyed off the matched title)
 ```
 
-Package layout:
+### Project Layout (and package summary)
 
-- `cmd/songlistener` — CLI: flag parsing and wiring only.
-- `internal/songs` — loads the song list from a text file.
-- `internal/matcher` — fuzzy string matching. Pure Go, no I/O, fully unit
-  tested independent of audio/whisper.
-- `internal/audio` — `Source` interface (microphone via
-  [malgo](https://github.com/gen2brain/malgo), or a WAV file for
-  dev/testing) and an energy-based voice-activity segmenter.
-- `internal/speech` — `Recognizer` interface, implemented by shelling out
-  to the whisper.cpp CLI.
-- `internal/app` — `Pipeline` wires the above together and defines the
-  `SONG_MATCH` event.
+- app - contains pipeline.go, which links audio, recognition, matcher together
+  - option to log audio levels for debugging
+- audio - the `Source` interface (`Stream()`, `SampleRate()`, `Close()`) for
+  anything that produces mono PCM samples, plus VAD and WAV support
+  - mic.go / mic_linux.go - the two `MicSource` implementations, chosen by
+    build tag: mic.go (`!linux`, i.e. macOS) uses malgo/miniaudio;
+    mic_linux.go uses ALSA directly via cgo. Both expose `GetDevices()` and
+    `SetDeviceInfo()` so `cmd/main.go` can list capture devices and prompt
+    for one before `Stream()` — useful on a multi-input interface (e.g. a
+    Focusrite Clarett) where there's no sane "default" to just pick
+  - vad.go - energy-based (RMS) voice-activity `Segmenter`; turns a raw
+    sample stream into speech `Segment`s
+  - wav.go - WAV read/write, plus `WAVSource` for running a prerecorded
+    file through the same pipeline as the mic
+- bin - builds
+- cmd - main.go type program run command(s)
+- docker - docker build utility scripts
+- matcher - text matcher. Match() return candidate strings.
+- slideshow - runs a feh slideshow
+- songs - loads a file of song titles
+- speech - Recognizer interface with Transcribe() method
+  - whisper.go implements Transcribe with whisper program
+- whisper.cpp - C/C++ port of OpenAI's automatic speech recognition model
 
-Each of `Source`, `Recognizer`, and the matcher is an interface so the
-pipeline can be (and is) tested with fakes, with no microphone, whisper.cpp
-binary, or model required — see `internal/app/pipeline_test.go`.
 
 ## Dependencies
 
 Kept intentionally minimal:
 
 - [`github.com/gen2brain/malgo`](https://github.com/gen2brain/malgo) — Go
-  bindings for miniaudio, used only for microphone capture
-  (`internal/audio/mic.go`). Chosen over alternatives like `portaudio`
-  because miniaudio is vendored as C source with no external system
-  library to install, and malgo has working support for both macOS and
-  Linux/ARM. It does require CGO — see "Building for Raspberry Pi" below
+  bindings for miniaudio, used for microphone capture on macOS
+  (`audio/mic.go`, build-tagged `!linux`). Chosen over alternatives like
+  `portaudio` because miniaudio is vendored as C source with no external
+  system library to install.
+- On Linux (`audio/mic_linux.go`), capture is a small direct cgo wrapper
+  around ALSA (`libasound`) instead of malgo — this needs `libasound2-dev`
+  at build time (the Dockerfile installs it) and gives direct access to
+  ALSA's card/device enumeration for the device-selection prompt.
+- Both capture paths require CGO — see "Building for Raspberry Pi" below
   for what that means for deployment.
 - Everything else (song loading, matching, WAV encode/decode, VAD, CLI) is
   standard library only.
@@ -77,13 +91,12 @@ bindings or writing a CGO wrapper:
   on a Pi 3.
 
 Given the plan's emphasis on reliability and simple deployment, the
-subprocess approach wins. `internal/speech.Recognizer` is an interface
-specifically so this choice could be swapped later without touching
-`internal/app` or `cmd/songlistener`.
+subprocess approach wins. `speech.Recognizer` is an interface specifically
+so this choice could be swapped later without touching `app` or `cmd`.
 
 ## Fuzzy matching
 
-The matcher (`internal/matcher`) never compares the whole transcript
+The matcher (`matcher`) never compares the whole transcript
 against the whole title. Instead, for each known title it:
 
 1. Normalizes both the title and the transcript (lowercase, expand a
@@ -106,12 +119,12 @@ against the whole title. Instead, for each known title it:
 The best- and second-best-scoring titles are returned together. A match
 is only reported "confident" if **both**:
 
-- the best score clears `--score-threshold` (default 0.78), **and**
+- the best score clears `--score-threshold` (default 0.85), **and**
 - the margin over the second-best clears `--margin-threshold` (default
   0.08)
 
 Both are required because a false positive (announcing the wrong song) is
-worse than reporting no match — see `internal/matcher/matcher_test.go` for
+worse than reporting no match — see `matcher/matcher_test.go` for
 a test built specifically around several similar "Honky Tonk ..." titles
 to exercise this margin logic.
 
@@ -126,7 +139,7 @@ keep for ~100 short English titles.
   for real-time-ish transcription of 1-5s segments on that CPU. `--model`
   is just a path, so `base.en` etc. can be tried by pointing at a
   different `.bin` file, no rebuild needed.
-- **VAD avoids unnecessary Whisper calls**: `internal/audio.Segmenter` is
+- **VAD avoids unnecessary Whisper calls**: `audio.Segmenter` is
   a cheap energy-based (RMS) detector that only emits a segment — and
   only then does whisper.cpp get invoked — once real speech is seen and
   enough trailing silence ends it. Background music/chatter/applause
@@ -135,9 +148,9 @@ keep for ~100 short English titles.
 - **Short segments**: `--vad-max-segment-ms` (default 8000) bounds worst
   case segment length, so a stuck-open segment (e.g. continuous loud
   background music) can't turn into a huge, slow transcription job.
-- **whisper.cpp threads**: pass `--threads 4` (or the Pi's actual core
-  count) so whisper.cpp uses all cores; leaving it at whisper.cpp's own
-  default may under-use the Pi 3's 4 cores depending on the build.
+- **whisper.cpp threads**: whisper-cli's own default is already 4 threads,
+  which matches a Pi 3's core count, so `--threads` doesn't need to be set
+  explicitly unless you're on a board with a different core count.
 - **Quantized models**: whisper.cpp's `tiny.en-q5_1`/`q8_0` quantized
   models trade a small amount of accuracy for meaningfully less CPU and
   memory; worth trying if `tiny.en` isn't fast enough in practice.
@@ -168,10 +181,10 @@ sh ./models/download-ggml-model.sh tiny.en
 This places a model at `whisper.cpp/models/ggml-tiny.en.bin` — pass that
 path via `--model`.
 
-Build songlistener:
+Build songarooni:
 
 ```
-make build     # -> bin/songlistener
+make build     # -> bin/songarooni-osx
 ```
 
 ## Running the text-only matcher (no audio, no whisper.cpp)
@@ -179,7 +192,7 @@ make build     # -> bin/songlistener
 Useful while tuning the matcher or song list:
 
 ```
-bin/songlistener --songs songs.txt --text "hey guys let's play honky tonk woman next"
+bin/songarooni-osx --songs songs.txt --text "hey guys let's play honky tonk woman next"
 ```
 
 Or via `make run-text TEXT="..."`. Exits 0 on a confident match, 1
@@ -200,7 +213,7 @@ file should be 16kHz mono (whisper.cpp's expected input); other formats
 may decode but will likely transcribe poorly.
 
 ```
-bin/songlistener \
+bin/songarooni-osx \
   --songs songs.txt \
   --model /path/to/whisper.cpp/models/ggml-tiny.en.bin \
   --whisper-bin /path/to/whisper.cpp/build/bin/whisper-cli \
@@ -217,11 +230,22 @@ Mac/Pi, and confirm the OS sees it as an input device (e.g. macOS Sound
 settings, or `arecord -l` on Linux).
 
 ```
-bin/songlistener \
+bin/songarooni-osx \
   --songs songs.txt \
   --model /path/to/whisper.cpp/models/ggml-tiny.en.bin \
   --whisper-bin /path/to/whisper.cpp/build/bin/whisper-cli
 ```
+
+Live mode lists capture devices and prompts you to pick one by number
+before it starts listening — there's no "just use the default" here,
+since on a multi-input interface (e.g. a Focusrite Clarett) the default
+is rarely the right one. If nothing seems to reach the matcher after
+that, the pipeline logs a periodic captured audio level (RMS) you can
+compare against `--vad-energy-threshold` — see `app/pipeline.go`'s
+`logAudioLevels` (currently enabled by uncommenting one line there); a
+level that stays near zero even while talking points at gain/routing on
+the interface rather than anything in this codebase — ALSA input gain is
+a common culprit, separate from the interface's own physical gain knobs.
 
 This runs continuously until Ctrl-C (or SIGTERM). On each confident
 match it prints a machine-readable line to stdout:
@@ -282,7 +306,7 @@ previous build's files never linger):
 - `songarooni-linux-arm64` — wrapper script; this is what you run
 - `songarooni-linux-arm64.bin` — the real binary
 - `whisper-cli` / `whisper-cli.bin` — same wrapper pattern, for whisper.cpp
-- `models/ggml-base.en.bin` — the bundled model (`ARG WHISPER_MODEL` in
+- `models/ggml-tiny.en.bin` — the bundled model (`ARG WHISPER_MODEL` in
   the Dockerfile controls which one; must match `songarooni.sh`'s
   `--model` flag)
 - `lib/` — the shared glibc all of the above run against
@@ -354,12 +378,17 @@ songarooni --songs songs.txt --model models/ggml-tiny.en.bin \
   `--audio` against a recording, and tune `--vad-energy-threshold`/
   `--vad-min-speech-ms`/`--vad-silence-ms` so it doesn't fire on
   applause/music but does reliably catch talkback speech.
-- **Microphone/USB interface enumeration**: confirm malgo picks up the
-  correct default input device on the Pi (vs. onboard audio, if any) —
-  test with `arecord -l` and, if needed, set the device as the system
-  default before relying on `internal/audio.NewMicSource`'s use of the
-  default capture device.
-- **CPU/thermal headroom under sustained use**: run songlistener for the
+- **Microphone/USB interface device selection**: live mode lists capture
+  devices and prompts for one by number at startup — confirm your
+  interface shows up (cross-check against `arecord -l`) and that you're
+  selecting the right one if more than one is listed.
+- **Input gain**: confirmed directly on a Clarett 4Pre — ALSA's own mixer
+  levels (`alsamixer -c <card>`) and the interface's *physical* gain knobs
+  are independent, and a mac-side Focusrite Control gain setting doesn't
+  carry over to the Pi. If the captured audio level (see "Microphone
+  setup and running live" above) stays near zero even while talking,
+  check both before assuming it's a code/routing problem.
+- **CPU/thermal headroom under sustained use**: run songarooni for the
   duration of a full set/show and watch CPU temp and throttling
   (`vcgencmd measure_temp`), since repeated whisper.cpp invocations over
   hours is a different load profile than a short test.
