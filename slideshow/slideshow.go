@@ -12,11 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
 	//go:embed logo.png
 	embeddedLogo []byte
+
+	maxSlideshowTime = time.Minute * 6 // switfh to "default" slides after this long without a new match
 )
 
 // Slideshow plays a feh slideshow keyed off a matched song title, with
@@ -75,10 +78,25 @@ func (s *Slideshow) Run(ctx context.Context) error {
 	defer os.Remove(s.logoPath)
 	defer s.player.stop()
 
+	ticker := time.NewTicker(maxSlideshowTime)
+	defer ticker.Stop()
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				log.Println("No new song match for a while; switching to default slides.")
+				s.Show("default")
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case songTitle := <-s.songChan:
 			log.Printf("Received song title: %s", songTitle)
+			ticker.Reset(maxSlideshowTime) // reset the "default" timer on every new match
 			slideDir := filepath.Join(s.parentDir, songTitle)
 			info, err := os.Stat(slideDir)
 			if err != nil || !info.IsDir() {
