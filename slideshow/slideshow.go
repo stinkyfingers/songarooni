@@ -22,6 +22,13 @@ var (
 	maxSlideshowTime = time.Minute * 6 // switfh to "default" slides after this long without a new match
 )
 
+// switchSettleDelay is how long switchTo waits after starting the new
+// feh process before killing the old one, giving the new window time to
+// map and render its first frame. Without this, killing the old process
+// first leaves a brief gap — with no slideshow window covering the
+// screen — in which the desktop underneath flashes visible.
+const switchSettleDelay = 1500 * time.Millisecond
+
 // Slideshow plays a feh slideshow keyed off a matched song title, with
 // images expected under <parentDir>/<song title>/.
 type Slideshow struct {
@@ -48,6 +55,15 @@ func New(parentDir string, logoFrequency, interval int) (*Slideshow, error) {
 	logoPath, err := logo()
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare logo: %w", err)
+	}
+
+	// Set the desktop background to the logo once, up front, as a
+	// fallback: if a gap in slideshow coverage ever slips through
+	// (startup, before the first match, or anything unexpected), this
+	// shows instead of the raw desktop. Non-fatal if it fails (e.g. no
+	// X11 session) — the slideshow itself doesn't depend on it.
+	if err := exec.Command("feh", "--bg-fill", logoPath).Run(); err != nil {
+		log.Printf("failed to set desktop background: %v", err)
 	}
 
 	return &Slideshow{
@@ -124,9 +140,9 @@ func (s *Slideshow) Run(ctx context.Context) error {
 }
 
 // player owns the single feh process that's currently showing a
-// slideshow, if any. switchTo kills whatever is running (if anything)
-// and starts a new one, synchronously and without needing anyone else to
-// be listening for a "stop" signal — which is what made the old
+// slideshow, if any. switchTo starts a new one and stops whatever was
+// running (if anything), synchronously and without needing anyone else
+// to be listening for a "stop" signal — which is what made the old
 // channel-handshake approach deadlock on the very first song match.
 type player struct {
 	mu           sync.Mutex
@@ -134,14 +150,16 @@ type player struct {
 	playlistPath string
 }
 
-// switchTo stops the current slideshow (if any) and starts feh against
-// playlistPath. playlistPath is removed automatically the next time the
-// slideshow is switched or stopped.
+// switchTo starts feh against playlistPath, then — after giving it a
+// moment to actually cover the screen — stops whatever slideshow was
+// previously running (if any). Deliberately start-then-kill rather than
+// kill-then-start: killing the old process first would leave a brief
+// gap with no slideshow window up, flashing the desktop behind it.
+// playlistPath is removed automatically the next time the slideshow is
+// switched or stopped.
 func (p *player) switchTo(playlistPath string, interval float64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	p.stopLocked()
 
 	cmd := exec.Command("feh", fehArgs(playlistPath, interval)...)
 	cmd.Stdout = os.Stdout
@@ -150,11 +168,13 @@ func (p *player) switchTo(playlistPath string, interval float64) error {
 		return fmt.Errorf("failed to start feh: %w", err)
 	}
 
-	p.cmd = cmd
-	p.playlistPath = playlistPath
+	time.Sleep(switchSettleDelay)
 
-	// Reap the process in the background so a later switchTo/stop isn't
-	// blocked waiting for feh to actually exit after being killed.
+	oldCmd, oldPlaylist := p.cmd, p.playlistPath
+	p.cmd, p.playlistPath = cmd, playlistPath
+
+	// Reap the new process in the background so a later switchTo/stop
+	// isn't blocked waiting for feh to actually exit after being killed.
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			// Expected when we kill it ourselves; only unexpected exits
@@ -164,6 +184,13 @@ func (p *player) switchTo(playlistPath string, interval float64) error {
 			}
 		}
 	}()
+
+	if oldCmd != nil && oldCmd.Process != nil {
+		_ = oldCmd.Process.Kill()
+	}
+	if oldPlaylist != "" {
+		os.Remove(oldPlaylist)
+	}
 
 	return nil
 }
@@ -233,10 +260,12 @@ func getSlides(imgDir, logoPath string, logoFrequency int) (*os.File, error) {
 		}
 	}
 
-	// randomized
-	rand.Shuffle(len(slideImages), func(i, j int) {
-		slideImages[i], slideImages[j] = slideImages[j], slideImages[i]
-	})
+	// randomized, if default
+	if strings.ToLower(imgDir) == "default" {
+		rand.Shuffle(len(slideImages), func(i, j int) {
+			slideImages[i], slideImages[j] = slideImages[j], slideImages[i]
+		})
+	}
 
 	fmt.Printf("Starting slideshow from %s with %d slides (logo alternates every %dth slide)\n", imgDir, len(slideImages), logoFrequency)
 
