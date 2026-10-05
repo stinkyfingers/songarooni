@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config configures the whisper.cpp CLI subprocess.
@@ -27,6 +28,8 @@ type Config struct {
 	// ExtraArgs are appended verbatim, for flags this package doesn't
 	// expose directly (e.g. constrained/grammar-guided decoding).
 	ExtraArgs []string
+	// Timeout bounds a single Transcribe call. Zero means DefaultTimeout.
+	Timeout time.Duration
 }
 
 // DefaultConfig returns a Config with a bare binary name (expected on
@@ -61,6 +64,13 @@ func NewWhisperCppRecognizer(cfg Config) (*WhisperCppRecognizer, error) {
 // Transcribe runs whisper.cpp against wavPath and returns the recognized
 // text.
 func (r *WhisperCppRecognizer) Transcribe(ctx context.Context, wavPath string) (string, error) {
+	timeout := r.cfg.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	args := r.buildArgs(wavPath)
 
 	cmd := exec.CommandContext(ctx, r.cfg.BinaryPath, args...)

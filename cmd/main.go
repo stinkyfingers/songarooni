@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,6 +26,17 @@ import (
 )
 
 func main() {
+	// Last-resort safety net: an unexpected panic anywhere in setup
+	// (segment-handling panics are already recovered per-segment in
+	// app.Pipeline) still exits cleanly with a message and stack trace,
+	// rather than Go's raw, less legible default panic output.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "error: unexpected panic: %v\n%s", r, debug.Stack())
+			os.Exit(1)
+		}
+	}()
+
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -32,12 +44,13 @@ func main() {
 }
 
 type cliConfig struct {
-	songsPath  string
-	modelPath  string
-	whisperBin string
-	language   string
-	threads    int
-	extraArgs  string
+	songsPath      string
+	modelPath      string
+	whisperBin     string
+	language       string
+	threads        int
+	extraArgs      string
+	whisperTimeout time.Duration
 
 	text       string
 	audio      string
@@ -89,6 +102,7 @@ Flags:`)
 	fs.StringVar(&cfg.language, "language", "en", "spoken language passed to whisper.cpp")
 	fs.IntVar(&cfg.threads, "threads", 0, "threads passed to whisper.cpp (0 = whisper.cpp's own default)")
 	fs.StringVar(&cfg.extraArgs, "whisper-args", "", "extra arguments passed through to whisper.cpp, space-separated")
+	fs.DurationVar(&cfg.whisperTimeout, "whisper-timeout", speech.DefaultTimeout, "max time to wait for a single whisper.cpp invocation before giving up on that segment")
 
 	fs.StringVar(&cfg.text, "text", "", "run only the matcher against this text and exit (no audio/whisper needed)")
 	fs.StringVar(&cfg.audio, "audio", "", "process a single prerecorded 16kHz mono WAV file and exit, instead of listening live")
@@ -175,6 +189,7 @@ func run() error {
 		Language:   cfg.language,
 		Threads:    cfg.threads,
 		ExtraArgs:  splitArgs(cfg.extraArgs),
+		Timeout:    cfg.whisperTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("configure whisper.cpp: %w", err)
@@ -309,6 +324,19 @@ func selectDevice(mic *audio.MicSource, logger *log.Logger) error {
 	if err != nil {
 		return fmt.Errorf("get devices: %w", err)
 	}
+	if len(devices) == 0 {
+		return fmt.Errorf("no capture devices found")
+	}
+	if len(devices) == 1 {
+		// Nothing to choose between, and this also means the program
+		// doesn't need an interactive terminal to start when there's
+		// only one capture device attached (e.g. an unattended
+		// restart after a crash, or a non-interactive launch).
+		logger.Printf("Using device 0: %s (only one found)", devices[0].Name())
+		mic.SetDeviceInfo(&devices[0])
+		return nil
+	}
+
 	logger.Println("Select device:")
 	for i, d := range devices {
 		logger.Printf("  %d: %s", i, d.Name())

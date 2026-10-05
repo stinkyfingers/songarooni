@@ -28,7 +28,15 @@ package speech
 import (
 	"context"
 	"fmt"
+	"time"
 )
+
+// DefaultTimeout bounds a single whisper.cpp invocation, so one stuck
+// process (a corrupt model, a pathological segment, whatever) can't hang
+// the whole pipeline forever with no way to recover short of killing the
+// program. Generous relative to realistic segment lengths and even a
+// slow Pi 3's transcription time.
+const DefaultTimeout = 60 * time.Second
 
 // Recognizer transcribes a WAV file to text.
 type Recognizer interface {

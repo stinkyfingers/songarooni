@@ -28,6 +28,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -79,7 +80,17 @@ func NewMicSource(sampleRate int) (*MicSource, error) {
 func (m *MicSource) GetDevices() ([]DeviceInfo, error) {
 	out, err := exec.Command("arecord", "-l").Output()
 	if err != nil {
-		return nil, fmt.Errorf("list capture devices (arecord -l): %w", err)
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			// Never ran at all (e.g. arecord not installed) — no
+			// output to fall back on.
+			return nil, fmt.Errorf("list capture devices (arecord -l): %w", err)
+		}
+		// arecord exits non-zero in some cases (e.g. a mix of capture
+		// and non-capture-capable cards) but may still have printed a
+		// usable device list before that; parse what it did output
+		// instead of discarding it.
+		log.Printf("arecord -l exited with an error (%v); parsing its output anyway", err)
 	}
 	return parseArecordDeviceList(string(out)), nil
 }

@@ -83,9 +83,22 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			p.handleSegment(ctx, seg, logger)
+			p.handleSegmentSafely(ctx, seg, logger)
 		}
 	}
+}
+
+// handleSegmentSafely recovers from a panic processing a single segment,
+// so one bad segment (or a bug anywhere in the Recognizer/Matcher/
+// OnMatch chain) logs and moves on to the next one instead of taking
+// down an otherwise fine, long-running live show.
+func (p *Pipeline) handleSegmentSafely(ctx context.Context, seg audio.Segment, logger *log.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Printf("recovered from panic handling segment: %v", r)
+		}
+	}()
+	p.handleSegment(ctx, seg, logger)
 }
 
 func (p *Pipeline) handleSegment(ctx context.Context, seg audio.Segment, logger *log.Logger) {

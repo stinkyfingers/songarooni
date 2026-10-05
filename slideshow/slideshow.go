@@ -272,8 +272,11 @@ func getSlides(imgDir, logoPath string, logoFrequency int) (*os.File, error) {
 		}
 	}
 
-	// randomized, if default
-	if strings.ToLower(imgDir) == "default" {
+	// randomized, if default. imgDir is a full path (parentDir joined
+	// with the subdirectory), so the subdirectory name itself — not the
+	// whole path — is what's compared here; comparing the full path
+	// against the literal string "default" could never match.
+	if strings.ToLower(filepath.Base(imgDir)) == "default" {
 		rand.Shuffle(len(slideImages), func(i, j int) {
 			slideImages[i], slideImages[j] = slideImages[j], slideImages[i]
 		})

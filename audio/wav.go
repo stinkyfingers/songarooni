@@ -84,12 +84,24 @@ type wavFmt struct {
 // integer PCM are supported, which covers whisper.cpp's expected input
 // and typical recordings; stereo files are downmixed to mono by
 // averaging channels.
+// maxWAVFileBytes caps the size of a WAV file ReadWAVFile will load into
+// memory. --audio is a dev/testing flag, not meant for arbitrarily large
+// recordings, and a Raspberry Pi 3 has limited RAM — this is generous
+// headroom for real test clips (a 200MB 16kHz mono WAV is over 3 hours)
+// while still refusing to load something clearly unintended rather than
+// risking an OOM.
+const maxWAVFileBytes = 200 * 1024 * 1024
+
 func ReadWAVFile(path string) ([]float32, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("open wav file %q: %w", path, err)
 	}
 	defer f.Close()
+
+	if info, err := f.Stat(); err == nil && info.Size() > maxWAVFileBytes {
+		return nil, 0, fmt.Errorf("%q is %d bytes, over the %d byte limit for --audio", path, info.Size(), maxWAVFileBytes)
+	}
 
 	r := bufio.NewReader(f)
 
@@ -115,8 +127,19 @@ func ReadWAVFile(path string) ([]float32, int, error) {
 			return nil, 0, fmt.Errorf("read chunk size %q: %w", path, err)
 		}
 
+		if chunkSize > maxWAVFileBytes {
+			return nil, 0, fmt.Errorf("%q: %s chunk claims %d bytes, over the %d byte limit", path, string(chunkID[:]), chunkSize, maxWAVFileBytes)
+		}
+
 		switch string(chunkID[:]) {
 		case "fmt ":
+			// A real fmt chunk is at least 16 bytes (the fixed fields
+			// read below); a shorter one is truncated/malformed. Without
+			// this check, a chunk size under 16 would panic on the
+			// buf[14:16] read a few lines down instead of erroring.
+			if chunkSize < 16 {
+				return nil, 0, fmt.Errorf("%q: fmt chunk is %d bytes, too short to be valid (need at least 16)", path, chunkSize)
+			}
 			buf := make([]byte, chunkSize)
 			if _, err := io.ReadFull(r, buf); err != nil {
 				return nil, 0, fmt.Errorf("read fmt chunk %q: %w", path, err)
