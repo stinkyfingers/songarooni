@@ -30,21 +30,25 @@ var (
 const switchSettleDelay = 1500 * time.Millisecond
 
 // Slideshow plays a feh slideshow keyed off a matched song title, with
-// images expected under <parentDir>/<song title>/.
+// images expected under <parentDir>/<subdirectory>/, where subdirectory
+// is songMap[title] if the title is mapped, or "default" otherwise.
 type Slideshow struct {
 	parentDir     string
 	logoPath      string
 	logoFrequency int
 	interval      int
+	songMap       map[string]string // title -> slideshow subdirectory name
 
 	player   *player
 	songChan chan string
 }
 
-// New prepares a Slideshow rooted at parentDir. It fails fast if
-// parentDir doesn't exist or the embedded logo can't be staged, rather
-// than discovering that a few iterations into Run.
-func New(parentDir string, logoFrequency, interval int) (*Slideshow, error) {
+// New prepares a Slideshow rooted at parentDir, using songMap (title ->
+// slideshow subdirectory name, see songs.LoadFile) to resolve a matched
+// title to its images. It fails fast if parentDir doesn't exist or the
+// embedded logo can't be staged, rather than discovering that a few
+// iterations into Run.
+func New(parentDir string, songMap map[string]string, logoFrequency, interval int) (*Slideshow, error) {
 	parentDir = expandPath(parentDir)
 
 	info, err := os.Stat(parentDir)
@@ -71,6 +75,7 @@ func New(parentDir string, logoFrequency, interval int) (*Slideshow, error) {
 		logoPath:      logoPath,
 		logoFrequency: logoFrequency,
 		interval:      interval,
+		songMap:       songMap,
 		player:        &player{},
 		songChan:      make(chan string, 1),
 	}, nil
@@ -113,7 +118,13 @@ func (s *Slideshow) Run(ctx context.Context) error {
 		case songTitle := <-s.songChan:
 			log.Printf("Received song title: %s", songTitle)
 			ticker.Reset(maxSlideshowTime) // reset the "default" timer on every new match
-			slideDir := filepath.Join(s.parentDir, songTitle)
+
+			subdir, ok := s.songMap[songTitle]
+			if !ok {
+				log.Printf("no song map entry for %q; using default slides", songTitle)
+				subdir = "default"
+			}
+			slideDir := filepath.Join(s.parentDir, subdir)
 			info, err := os.Stat(slideDir)
 			if err != nil || !info.IsDir() {
 				// Not an error; just no slides for this song.

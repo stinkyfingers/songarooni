@@ -6,8 +6,6 @@
 // a microphone or Whisper.
 package matcher
 
-import "songarooni/songs"
-
 // Candidate is one scored title from a Match call.
 type Candidate struct {
 	Title string
@@ -60,14 +58,13 @@ type preparedTitle struct {
 	tokens []string
 }
 
-// New builds a Matcher for the given songs and thresholds.
-func New(list []songs.Song, cfg Config) *Matcher {
-	prepared := make([]preparedTitle, 0, len(list))
-	for _, s := range list {
-		norm := normalize(s.Title)
+// New builds a Matcher for the given song titles and thresholds.
+func New(titles []string, cfg Config) *Matcher {
+	prepared := make([]preparedTitle, 0, len(titles))
+	for _, title := range titles {
 		prepared = append(prepared, preparedTitle{
-			title:  s.Title,
-			tokens: tokenize(norm),
+			title:  title,
+			tokens: tokenize(normalize(title)),
 		})
 	}
 	return &Matcher{cfg: cfg, titles: prepared}

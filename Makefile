@@ -56,4 +56,4 @@ build-pi-docker:
 
 # Convenience target for tuning the matcher: make run-text TEXT="..."
 run-text:
-	go run $(CMD) --songs songs.txt --text "$(TEXT)"
+	go run $(CMD) --songs songs.csv --text "$(TEXT)"

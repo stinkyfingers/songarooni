@@ -72,18 +72,18 @@ recognition and fuzzy text matching to tolerate imperfect transcription.
 
 Usage:
 
-  songlistener --songs songs.txt --model models/ggml-tiny.en.bin
+  songlistener --songs songs.csv --model models/ggml-tiny.en.bin
 
   # Development modes, no microphone or whisper.cpp required for --text:
-  songlistener --songs songs.txt --text "let's play honky tonk woman"
-  songlistener --songs songs.txt --model models/ggml-tiny.en.bin --audio test.wav
+  songlistener --songs songs.csv --text "let's play honky tonk woman"
+  songlistener --songs songs.csv --model models/ggml-tiny.en.bin --audio test.wav
 
 Flags:`)
 		fs.PrintDefaults()
 	}
 
 	cfg := &cliConfig{}
-	fs.StringVar(&cfg.songsPath, "songs", "songs.txt", "path to the song list file (one title per line)")
+	fs.StringVar(&cfg.songsPath, "songs", "songs.csv", "path to the song list CSV (title,path header + rows; path is the slideshow subdirectory for that title)")
 	fs.StringVar(&cfg.modelPath, "model", "", "path to a whisper.cpp ggml model file (required unless --text is used)")
 	fs.StringVar(&cfg.whisperBin, "whisper-bin", "whisper-cli", "path to the whisper.cpp CLI binary")
 	fs.StringVar(&cfg.language, "language", "en", "spoken language passed to whisper.cpp")
@@ -145,12 +145,17 @@ func run() error {
 	}
 
 	logger.Println("Loading song list...")
-	songList, err := songs.LoadFile(cfg.songsPath)
+	songMap, err := songs.LoadFile(cfg.songsPath)
 	if err != nil {
 		return fmt.Errorf("load song list: %w", err)
 	}
 
-	m := matcher.New(songList, matcher.Config{
+	titles := make([]string, 0, len(songMap))
+	for title := range songMap {
+		titles = append(titles, title)
+	}
+
+	m := matcher.New(titles, matcher.Config{
 		ScoreThreshold:  cfg.scoreThreshold,
 		MarginThreshold: cfg.marginThreshold,
 	})
@@ -182,7 +187,7 @@ func run() error {
 	// is missing/misconfigured, log and continue without it rather than
 	// failing the whole program.
 	var matchHandler func(app.MatchEvent)
-	sh, err := slideshow.New(cfg.slideShowParentDir, cfg.defaultLogoFrequency, cfg.defaultInterval)
+	sh, err := slideshow.New(cfg.slideShowParentDir, songMap, cfg.defaultLogoFrequency, cfg.defaultInterval)
 	if err != nil {
 		logger.Printf("slideshow unavailable: %v", err)
 	} else {

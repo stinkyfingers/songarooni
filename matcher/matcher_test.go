@@ -2,20 +2,10 @@ package matcher
 
 import (
 	"testing"
-
-	"songarooni/songs"
 )
 
-func titleList(titles ...string) []songs.Song {
-	out := make([]songs.Song, len(titles))
-	for i, t := range titles {
-		out[i] = songs.Song{Title: t}
-	}
-	return out
-}
-
-func testSongList() []songs.Song {
-	return titleList(
+func testSongList() []string {
+	return []string{
 		"Honky Tonk Women",
 		"Honky Tonk Man",
 		"Honky Tonk Blues",
@@ -23,7 +13,7 @@ func testSongList() []songs.Song {
 		"Friends in Low Places",
 		"Take It Easy",
 		"The Weight",
-	)
+	}
 }
 
 func TestMatch_Confident(t *testing.T) {

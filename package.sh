@@ -9,7 +9,7 @@ cd "$dir"
 # replacing it, so a stale previous zip's contents (e.g. leftover files
 # from a since-changed bin/ layout) would otherwise linger forever.
 rm -f songarooni.zip
-zip -r songarooni.zip bin songs.txt songarooni.sh
+zip -r songarooni.zip bin songs.csv songarooni.sh
 
 cp songarooni.zip ~/Desktop/songarooni.zip
 

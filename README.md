@@ -42,7 +42,10 @@ microphone/line-in
 - docker - docker build utility scripts
 - matcher - text matcher. Match() return candidate strings.
 - slideshow - runs a feh slideshow
-- songs - loads a file of song titles
+- songs - loads `songs.csv` (`title,path` header + rows) into a
+  title -> slideshow-subdirectory map; the single source of truth for
+  both the matcher's known titles (its keys) and the slideshow's
+  per-title image directory (its values)
 - speech - Recognizer interface with Transcribe() method
   - whisper.go implements Transcribe with whisper program
 - whisper.cpp - C/C++ port of OpenAI's automatic speech recognition model
@@ -192,7 +195,7 @@ make build     # -> bin/songarooni-osx
 Useful while tuning the matcher or song list:
 
 ```
-bin/songarooni-osx --songs songs.txt --text "hey guys let's play honky tonk woman next"
+bin/songarooni-osx --songs songs.csv --text "hey guys let's play honky tonk woman next"
 ```
 
 Or via `make run-text TEXT="..."`. Exits 0 on a confident match, 1
@@ -214,7 +217,7 @@ may decode but will likely transcribe poorly.
 
 ```
 bin/songarooni-osx \
-  --songs songs.txt \
+  --songs songs.csv \
   --model /path/to/whisper.cpp/models/ggml-tiny.en.bin \
   --whisper-bin /path/to/whisper.cpp/build/bin/whisper-cli \
   --audio test.wav
@@ -231,7 +234,7 @@ settings, or `arecord -l` on Linux).
 
 ```
 bin/songarooni-osx \
-  --songs songs.txt \
+  --songs songs.csv \
   --model /path/to/whisper.cpp/models/ggml-tiny.en.bin \
   --whisper-bin /path/to/whisper.cpp/build/bin/whisper-cli
 ```
@@ -332,10 +335,10 @@ make build-pi-native   # -> bin/songarooni-linux-arm
 The easiest path is [package.sh](package.sh) end to end:
 
 1. `make build-pi-docker` (Option A above).
-2. `./package.sh` — zips `bin/`, `songs.txt`, and `songarooni.sh` into
+2. `./package.sh` — zips `bin/`, `songs.csv`, and `songarooni.sh` into
    `songarooni.zip` and copies it to your Desktop.
 3. Move the zip to the Pi (thumb drive, `scp`, etc.) and unzip it at
-   `$HOME` (e.g. `~/songarooni/`) — `bin/`, `songs.txt`, and
+   `$HOME` (e.g. `~/songarooni/`) — `bin/`, `songs.csv`, and
    `songarooni.sh` should end up as siblings there.
 4. Run `./songarooni.sh` (see its comments for passing extra flags, e.g.
    `--slideshow-dir`).
@@ -345,7 +348,7 @@ your own whisper.cpp build/model to the Pi and invoke it directly:
 
 ```
 ./songarooni-linux-arm \
-  --songs songs.txt \
+  --songs songs.csv \
   --model ~/whisper.cpp/models/ggml-tiny.en.bin \
   --whisper-bin ~/whisper.cpp/build/bin/whisper-cli \
   --threads 4
@@ -356,11 +359,11 @@ your own whisper.cpp build/model to the Pi and invoke it directly:
 ```
 songarooni --help
 
-songarooni --songs songs.txt --text "this one's take it easy"
+songarooni --songs songs.csv --text "this one's take it easy"
 
-songarooni --songs songs.txt --model models/ggml-tiny.en.bin --audio test.wav
+songarooni --songs songs.csv --model models/ggml-tiny.en.bin --audio test.wav
 
-songarooni --songs songs.txt --model models/ggml-tiny.en.bin \
+songarooni --songs songs.csv --model models/ggml-tiny.en.bin \
   --whisper-bin whisper.cpp/build/bin/whisper-cli \
   --vad-energy-threshold 0.03 --vad-silence-ms 400 \
   --score-threshold 0.8 --margin-threshold 0.1

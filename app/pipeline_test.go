@@ -8,7 +8,6 @@ import (
 
 	"songarooni/audio"
 	"songarooni/matcher"
-	"songarooni/songs"
 	"songarooni/speech"
 )
 
@@ -61,11 +60,8 @@ func (f *fakeRecognizer) Transcribe(ctx context.Context, wavPath string) (string
 func newTestPipeline(t *testing.T, samples []float32, rec *fakeRecognizer) (*Pipeline, *[]MatchEvent) {
 	t.Helper()
 
-	songList := []songs.Song{
-		{Title: "Honky Tonk Women"},
-		{Title: "Folsom Prison Blues"},
-	}
-	m := matcher.New(songList, matcher.DefaultConfig())
+	titles := []string{"Honky Tonk Women", "Folsom Prison Blues"}
+	m := matcher.New(titles, matcher.DefaultConfig())
 
 	vadCfg := audio.DefaultVADConfig(testSampleRate)
 	vadCfg.MinSpeechMS = 100

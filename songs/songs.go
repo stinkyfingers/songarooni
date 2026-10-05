@@ -1,48 +1,52 @@
-// Package songs loads the list of known song titles from a plain text file.
+// Package songs loads the known song list — title plus its slideshow
+// subdirectory name — from a CSV file.
 package songs
 
 import (
-	"bufio"
+	"encoding/csv"
 	"fmt"
 	"os"
-	"strings"
 )
 
-// Song is a single entry from the song list file.
-type Song struct {
-	// Title is the original, unmodified title as written in the file.
-	Title string
-	// Aliases are optional alternate spellings/names for the same song.
-	// The file format for aliases is not yet defined; this exists so the
-	// matcher and file format can grow without an API change.
-	Aliases []string
-}
-
-// LoadFile reads a song list from path, one title per line.
+// LoadFile reads a CSV file with a header row (e.g. "title,path")
+// followed by rows mapping a song title to the slideshow subdirectory
+// name to use for it, e.g.:
 //
-// Blank lines and lines beginning with '#' are ignored so the file can
-// contain comments and spacing for readability.
-func LoadFile(path string) ([]Song, error) {
+//	title,path
+//	Mustang Sally,mustang_sally
+//	"I Like It, I Love It",i_like_it_i_love_it
+//
+// A real CSV parser is used deliberately rather than splitting lines on
+// commas: some titles contain commas themselves and are quoted.
+//
+// The returned map is the single source of truth for both the matcher
+// (its keys are the known titles) and the slideshow (title -> the
+// subdirectory to pull images from).
+func LoadFile(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open song list %q: %w", path, err)
 	}
 	defer f.Close()
 
-	var out []Song
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		out = append(out, Song{Title: line})
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = 2
+
+	records, err := r.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("parse song list %q: %w", path, err)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read song list %q: %w", path, err)
+	if len(records) == 0 {
+		return nil, fmt.Errorf("song list %q is empty", path)
 	}
-	if len(out) == 0 {
+
+	songs := make(map[string]string, len(records)-1)
+	for _, record := range records[1:] { // skip header row
+		title, subdir := record[0], record[1]
+		songs[title] = subdir
+	}
+	if len(songs) == 0 {
 		return nil, fmt.Errorf("song list %q contains no titles", path)
 	}
-	return out, nil
+	return songs, nil
 }
