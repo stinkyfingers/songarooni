@@ -124,12 +124,13 @@ func (s *Slideshow) Run(ctx context.Context) error {
 				log.Printf("no song map entry for %q; using default slides", songTitle)
 				subdir = "default"
 			}
+			log.Printf("Looking for slides in %s/%s", s.parentDir, subdir)
 			slideDir := filepath.Join(s.parentDir, subdir)
 			info, err := os.Stat(slideDir)
 			if err != nil || !info.IsDir() {
 				// Not an error; just no slides for this song.
-				// Leave whatever is currently playing alone.
-				continue
+				// Play default
+				slideDir = filepath.Join(s.parentDir, "default")
 			}
 			slides, err := getSlides(slideDir, s.logoPath, s.logoFrequency)
 			if err != nil {
