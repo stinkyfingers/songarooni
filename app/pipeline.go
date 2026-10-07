@@ -53,6 +53,17 @@ var (
 	logAudioLevelFreq = time.Second * 5
 )
 
+// segmentQueueSize bounds how many completed segments can be waiting for
+// transcription at once. Transcription (whisper.cpp) can take ~15s on a
+// Raspberry Pi 3, far longer than a typical segment; without this queue,
+// Run would only read from the Segmenter's output between calls to
+// handleSegment, which would stall VAD segmentation — and, upstream, the
+// Source itself — for the entire duration of every transcription. A
+// small bound still protects against unbounded memory growth if someone
+// talks continuously for a long time; segments beyond it are dropped
+// rather than queued indefinitely.
+const segmentQueueSize = 4
+
 // Run streams audio from Source, and for every speech segment the
 // Segmenter emits, transcribes it and attempts a song match, logging
 // progress and emitting SONG_MATCH lines to stdout as described in
@@ -75,13 +86,49 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 	segments := p.Segmenter.Run(ctx, samples)
 
+	queue := make(chan audio.Segment, segmentQueueSize)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.processQueue(ctx, queue, logger)
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case seg, ok := <-segments:
 			if !ok {
+				// Normal end of input (source exhausted, e.g. a WAV file
+				// in audio-file mode): let the worker finish whatever's
+				// still queued before Run returns, so callers can still
+				// rely on every segment having been handled by the time
+				// Run returns.
+				close(queue)
+				<-done
 				return nil
+			}
+			select {
+			case queue <- seg:
+			default:
+				logger.Println("transcription backlog full; dropping segment")
+			}
+		}
+	}
+}
+
+// processQueue transcribes and matches queued segments one at a time, so
+// a slow transcription never blocks Run from continuing to drain the
+// Segmenter (see segmentQueueSize). It returns once queue is closed and
+// drained, or ctx is cancelled.
+func (p *Pipeline) processQueue(ctx context.Context, queue <-chan audio.Segment, logger *log.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case seg, ok := <-queue:
+			if !ok {
+				return
 			}
 			p.handleSegmentSafely(ctx, seg, logger)
 		}

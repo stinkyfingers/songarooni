@@ -13,6 +13,7 @@ func testSongList() []string {
 		"Friends in Low Places",
 		"Take It Easy",
 		"The Weight",
+		"Chattahoochie",
 	}
 }
 
@@ -75,6 +76,28 @@ func TestMatch_MarginPreventsFalsePositive(t *testing.T) {
 	if res.Matched {
 		t.Fatalf("ambiguous transcript %q matched %q; margin should have blocked it (best=%.3f second=%.3f)",
 			"honky tonk", res.Best.Title, res.Best.Score, res.Second.Score)
+	}
+}
+
+// TestMatch_PhoneticNearMissRanksBest exercises a real-world failure mode:
+// Whisper misheard "Chattahoochie" as this phonetically close but very
+// differently spelled phrase. phoneticKey's consonant-skeleton comparison
+// (see phonetic.go) is what lets the right title still rank first by a
+// clear margin, even though a single word fragmenting into four wrong
+// ones is extreme enough that it doesn't clear the default confidence
+// threshold on its own — the --prompt biasing wired up in speech/whisper.go
+// is what should keep Whisper from mangling it this badly in practice.
+func TestMatch_PhoneticNearMissRanksBest(t *testing.T) {
+	m := New(testSongList(), DefaultConfig())
+
+	res := m.Match("chart a who chi")
+	if res.Best.Title != "Chattahoochie" {
+		t.Fatalf("Best.Title = %q (score %.3f), want %q", res.Best.Title, res.Best.Score, "Chattahoochie")
+	}
+	const minMargin = 0.15
+	if margin := res.Best.Score - res.Second.Score; margin < minMargin {
+		t.Fatalf("margin over second place = %.3f, want >= %.3f (best=%.3f second=%q %.3f)",
+			margin, minMargin, res.Best.Score, res.Second.Title, res.Second.Score)
 	}
 }
 

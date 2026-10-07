@@ -54,17 +54,20 @@ type Matcher struct {
 }
 
 type preparedTitle struct {
-	title  string
-	tokens []string
+	title    string
+	tokens   []string
+	phonetic string
 }
 
 // New builds a Matcher for the given song titles and thresholds.
 func New(titles []string, cfg Config) *Matcher {
 	prepared := make([]preparedTitle, 0, len(titles))
 	for _, title := range titles {
+		tokens := tokenize(normalize(title))
 		prepared = append(prepared, preparedTitle{
-			title:  title,
-			tokens: tokenize(normalize(title)),
+			title:    title,
+			tokens:   tokens,
+			phonetic: phoneticJoin(tokens),
 		})
 	}
 	return &Matcher{cfg: cfg, titles: prepared}
@@ -118,9 +121,10 @@ func scoreTitle(t preparedTitle, transcriptTokens []string) float64 {
 			window := transcriptTokens[start : start+size]
 			windowStr := joinTokens(window)
 
-			score := 0.5*jaroWinkler(titleStr, windowStr) +
-				0.3*tokenOverlap(t.tokens, window) +
-				0.2*levenshteinSimilarity(titleStr, windowStr)
+			score := 0.4*jaroWinkler(titleStr, windowStr) +
+				0.2*tokenOverlap(t.tokens, window) +
+				0.15*levenshteinSimilarity(titleStr, windowStr) +
+				0.25*levenshteinSimilarity(t.phonetic, phoneticJoin(window))
 
 			if score > best {
 				best = score
@@ -141,9 +145,21 @@ func scoreTitle(t preparedTitle, transcriptTokens []string) float64 {
 // count, plus one shorter and one longer, to tolerate Whisper dropping or
 // inserting a word (e.g. trailing "next"). Sizes are clamped to the
 // transcript length.
+//
+// Titles of 1-2 tokens get extra slack above that, up to 4: a single
+// unusual word (e.g. "Chattahoochie") can come out of Whisper split into
+// several small mistranscribed words, which the usual +1 slack can't
+// reach — longer titles rarely fragment that badly, so they don't need
+// the wider search.
 func windowSizes(titleLen, transcriptLen int) []int {
-	sizes := make([]int, 0, 3)
-	for _, size := range []int{titleLen - 1, titleLen, titleLen + 1} {
+	minSize := titleLen - 1
+	maxSize := titleLen + 1
+	if titleLen <= 2 && maxSize < 4 {
+		maxSize = 4
+	}
+
+	sizes := make([]int, 0, maxSize-minSize+1)
+	for size := minSize; size <= maxSize; size++ {
 		if size >= 1 && size <= transcriptLen {
 			sizes = append(sizes, size)
 		}

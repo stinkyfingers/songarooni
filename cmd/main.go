@@ -190,6 +190,10 @@ func run() error {
 		Threads:    cfg.threads,
 		ExtraArgs:  splitArgs(cfg.extraArgs),
 		Timeout:    cfg.whisperTimeout,
+		// Bias whisper.cpp's decoder toward the known song titles, so
+		// unusual proper nouns (e.g. "Chattahoochie") are more likely to
+		// come out transcribed correctly rather than phonetically.
+		Prompt: strings.Join(titles, ", "),
 	})
 	if err != nil {
 		return fmt.Errorf("configure whisper.cpp: %w", err)
