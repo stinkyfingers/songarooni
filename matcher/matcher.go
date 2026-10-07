@@ -42,7 +42,7 @@ type Config struct {
 // they can be adjusted without a rebuild.
 func DefaultConfig() Config {
 	return Config{
-		ScoreThreshold:  0.85,
+		ScoreThreshold:  0.81,
 		MarginThreshold: 0.08,
 	}
 }

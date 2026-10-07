@@ -100,9 +100,13 @@ func (m *MicSource) Stream(ctx context.Context) (<-chan []float32, error) {
 	m.device = device
 	m.mu.Unlock()
 
+	// Device teardown happens in Close() only (always deferred by
+	// callers), not here too: both this goroutine and Close() fire off
+	// the same ctx cancellation, so calling device.Uninit() in both
+	// places was a race — two Uninit calls on the same native device
+	// causing a segfault inside malgo's cgo code on Ctrl-C.
 	go func() {
 		<-ctx.Done()
-		device.Uninit()
 		close(out)
 	}()
 
