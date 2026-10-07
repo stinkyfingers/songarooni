@@ -1,7 +1,6 @@
 package slideshow
 
 import (
-	"bufio"
 	"context"
 	_ "embed"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -19,28 +17,20 @@ var (
 	//go:embed logo.png
 	embeddedLogo []byte
 
-	maxSlideshowTime = time.Minute * 6 // switfh to "default" slides after this long without a new match
+	maxSlideshowTime = time.Minute * 5 // switch to "default" slides after this long without a new match
 )
-
-// switchSettleDelay is how long switchTo waits after starting the new
-// feh process before killing the old one, giving the new window time to
-// map and render its first frame. Without this, killing the old process
-// first leaves a brief gap — with no slideshow window covering the
-// screen — in which the desktop underneath flashes visible.
-const switchSettleDelay = 1500 * time.Millisecond
 
 // Slideshow plays a feh slideshow keyed off a matched song title, with
 // images expected under <parentDir>/<subdirectory>/, where subdirectory
 // is songMap[title] if the title is mapped, or "default" otherwise.
 type Slideshow struct {
 	parentDir     string
-	logoPath      string
 	logoFrequency int
 	interval      int
 	songMap       map[string]string // title -> slideshow subdirectory name
 
-	player   *player
-	songChan chan string
+	startChan chan struct{}
+	songChan  chan string
 }
 
 // New prepares a Slideshow rooted at parentDir, using songMap (title ->
@@ -56,27 +46,12 @@ func New(parentDir string, songMap map[string]string, logoFrequency, interval in
 		return nil, fmt.Errorf("parent image directory not found: %s", parentDir)
 	}
 
-	logoPath, err := logo()
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare logo: %w", err)
-	}
-
-	// Set the desktop background to the logo once, up front, as a
-	// fallback: if a gap in slideshow coverage ever slips through
-	// (startup, before the first match, or anything unexpected), this
-	// shows instead of the raw desktop. Non-fatal if it fails (e.g. no
-	// X11 session) — the slideshow itself doesn't depend on it.
-	if err := exec.Command("feh", "--bg-fill", logoPath).Run(); err != nil {
-		log.Printf("failed to set desktop background: %v", err)
-	}
-
 	return &Slideshow{
 		parentDir:     parentDir,
-		logoPath:      logoPath,
 		logoFrequency: logoFrequency,
 		interval:      interval,
 		songMap:       songMap,
-		player:        &player{},
+		startChan:     make(chan struct{}, 1),
 		songChan:      make(chan string, 1),
 	}, nil
 }
@@ -93,154 +68,142 @@ func (s *Slideshow) Show(songTitle string) {
 	}
 }
 
-// Run processes Show requests, switching the running feh slideshow to
-// match, until ctx is cancelled.
-func (s *Slideshow) Run(ctx context.Context) error {
-	defer os.Remove(s.logoPath)
-	defer s.player.stop()
+func (s *Slideshow) Start() {
+	s.startChan <- struct{}{}
+}
 
-	ticker := time.NewTicker(maxSlideshowTime)
-	defer ticker.Stop()
+func (s *Slideshow) Run(ctx context.Context) error {
+	<-s.startChan
+	fmt.Println("Starting slideshow stream...")
+
+	logo, err := os.Create("songarooni-slideshow-logo.png")
+	if err != nil {
+		return fmt.Errorf("failed to create logo file: %w", err)
+	}
+	defer logo.Close()
+	err = os.WriteFile(logo.Name(), embeddedLogo, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write slide deck file: %w", err)
+	}
+
+	imgList, err := os.Create("img-list.txt")
+	if err != nil {
+		return fmt.Errorf("failed to create slide deck file: %w", err)
+	}
+	defer imgList.Close()
+
+	absLogoPath, err := filepath.Abs(logo.Name())
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path of logo: %w", err)
+	}
+	logoLineLen, err := imgList.WriteString(absLogoPath + "\n")
+	if err != nil {
+		log.Println("Error writing to img-list.txt:", err)
+	}
+
+	// return to default slides after maxSlideshowTime without a new match
+	timer := time.NewTimer(maxSlideshowTime)
+	defer timer.Stop()
 	go func() {
 		for {
 			select {
-			case <-ticker.C:
-				log.Println("No new song match for a while; switching to default slides.")
-				s.Show("default")
 			case <-ctx.Done():
 				return
+			case <-timer.C:
+				fmt.Println("No new match for a while; switching to default slides")
+				s.Show("default")
 			}
 		}
 	}()
 
-	for {
-		select {
-		case songTitle := <-s.songChan:
-			log.Printf("Received song title: %s", songTitle)
-			ticker.Reset(maxSlideshowTime) // reset the "default" timer on every new match
-
-			subdir, ok := s.songMap[songTitle]
-			if !ok {
-				log.Printf("no song map entry for %q; using default slides", songTitle)
-				subdir = "default"
-			}
-			log.Printf("Looking for slides in %s/%s", s.parentDir, subdir)
-			slideDir := filepath.Join(s.parentDir, subdir)
-			info, err := os.Stat(slideDir)
-			if err != nil || !info.IsDir() {
-				// Not an error; just no slides for this song.
-				// Play default
-				slideDir = filepath.Join(s.parentDir, "default")
-			}
-			slides, err := getSlides(slideDir, s.logoPath, s.logoFrequency)
-			if err != nil {
-				log.Printf("failed to get slides for %s: %v", songTitle, err)
-				continue
-			}
-
-			log.Printf("Starting slideshow for song: %s", songTitle)
-			if err := s.player.switchTo(slides.Name(), float64(s.interval)); err != nil {
-				log.Printf("failed to start slideshow for %s: %v", songTitle, err)
-				os.Remove(slides.Name())
-			}
-
-		case <-ctx.Done():
-			log.Println("Stopping slideshow...")
-			return nil
-		}
-	}
-}
-
-// player owns the single feh process that's currently showing a
-// slideshow, if any. switchTo starts a new one and stops whatever was
-// running (if anything), synchronously and without needing anyone else
-// to be listening for a "stop" signal — which is what made the old
-// channel-handshake approach deadlock on the very first song match.
-type player struct {
-	mu           sync.Mutex
-	cmd          *exec.Cmd
-	playlistPath string
-}
-
-// switchTo starts feh against playlistPath, then — after giving it a
-// moment to actually cover the screen — stops whatever slideshow was
-// previously running (if any). Deliberately start-then-kill rather than
-// kill-then-start: killing the old process first would leave a brief
-// gap with no slideshow window up, flashing the desktop behind it.
-// playlistPath is removed automatically the next time the slideshow is
-// switched or stopped.
-func (p *player) switchTo(playlistPath string, interval float64) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	cmd := exec.Command("feh", fehArgs(playlistPath, interval)...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start feh: %w", err)
-	}
-
-	time.Sleep(switchSettleDelay)
-
-	oldCmd, oldPlaylist := p.cmd, p.playlistPath
-	p.cmd, p.playlistPath = cmd, playlistPath
-
-	// Reap the new process in the background so a later switchTo/stop
-	// isn't blocked waiting for feh to actually exit after being killed.
 	go func() {
-		if err := cmd.Wait(); err != nil {
-			// Expected when we kill it ourselves; only unexpected exits
-			// are worth a log line.
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != -1 {
-				log.Printf("feh exited: %v", err)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case songTitle := <-s.songChan:
+				timer.Reset(maxSlideshowTime)
+
+				// get path from song title
+				subdir, ok := s.songMap[songTitle]
+				if !ok {
+					log.Printf("no song map entry for %q; using default slides", songTitle)
+					subdir = "default"
+				}
+				fmt.Printf("Looking for slides in %s/%s\n", s.parentDir, subdir)
+				slideDir := filepath.Join(s.parentDir, subdir)
+				info, err := os.Stat(slideDir)
+				if err != nil || !info.IsDir() {
+					// Not an error; just no slides for this song.
+					// Play default
+					slideDir = filepath.Join(s.parentDir, "default")
+				}
+
+				// slide file names
+				deck, err := slideDeck(slideDir, logo.Name(), s.logoFrequency)
+				if err != nil {
+					log.Println("Error getting slides:", err)
+					continue
+				}
+
+				// Keep the logo line (the first logoLineLen bytes) and
+				// overwrite everything after it with the new deck.
+				// len(embeddedLogo) is the PNG's byte size, not this
+				// line's length, and Seek(0, 0) rewinds to the start of
+				// the file — both would clobber the logo line itself.
+				if err := imgList.Truncate(int64(logoLineLen)); err != nil {
+					log.Println("Error truncating img-list.txt:", err)
+				}
+				if _, err := imgList.Seek(int64(logoLineLen), 0); err != nil {
+					log.Println("Error seeking img-list.txt:", err)
+				}
+				for _, slide := range deck {
+					_, err = imgList.WriteString(slide + "\n")
+					if err != nil {
+						log.Println("Error writing to img-list.txt:", err)
+					}
+				}
+				if err = imgList.Sync(); err != nil {
+					log.Println("Error syncing img-list.txt:", err)
+				}
+
 			}
 		}
 	}()
+	fmt.Println(filepath.Abs(imgList.Name()))
 
-	if oldCmd != nil && oldCmd.Process != nil {
-		_ = oldCmd.Process.Kill()
+	path, err := (filepath.Abs(imgList.Name()))
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path of img-list.txt: %w", err)
 	}
-	if oldPlaylist != "" {
-		os.Remove(oldPlaylist)
-	}
-
-	return nil
-}
-
-// stop ends whatever slideshow is currently running, if any.
-func (p *player) stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stopLocked()
-}
-
-func (p *player) stopLocked() {
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
-	p.cmd = nil
-
-	if p.playlistPath != "" {
-		os.Remove(p.playlistPath)
-		p.playlistPath = ""
-	}
-}
-
-// fehArgs builds the feh CLI arguments for playing playlistPath on a
-// fixed interval.
-func fehArgs(playlistPath string, interval float64) []string {
+	log.Printf("Using img-list.txt at %s", path)
 	args := []string{
 		"-F",                                // fullscreen
 		"-Z",                                // auto-zoom
-		"-D", fmt.Sprintf("%.1f", interval), // slide delay
-		"--hide-pointer",           // hide mouse cursor
-		"--quiet",                  // suppress warnings
-		"--filelist", playlistPath, // read filepaths from file
+		"-D", fmt.Sprintf("%d", s.interval), // slide delay
+		"-R", fmt.Sprintf("%d", s.interval), // reload every n seconds
+		"--hide-pointer", // hide mouse cursor
+		"--quiet",        // suppress warnings
+		"-f", path,       // directory to watch
 	}
-	return args
+
+	// feh exiting for any reason (crash, closed window, X restart, ...)
+	// must not end Run: the goroutines above are tied to ctx and run for
+	// the app's whole lifetime, so returning here on every feh exit would
+	// tear down tmpDir out from under them. Only ctx cancellation ends
+	// Run; any other feh exit is logged and feh is restarted.
+	for {
+		execCmd := exec.CommandContext(ctx, "feh", args...)
+		runErr := execCmd.Run()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("feh exited unexpectedly (%v); restarting", runErr)
+		time.Sleep(time.Second)
+	}
 }
 
-func getSlides(imgDir, logoPath string, logoFrequency int) (*os.File, error) {
+func slideDeck(imgDir, logoPath string, logoFrequency int) ([]string, error) {
 	info, err := os.Stat(imgDir)
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("image directory not found: %s", imgDir)
@@ -251,6 +214,9 @@ func getSlides(imgDir, logoPath string, logoFrequency int) (*os.File, error) {
 			return err
 		}
 		if !info.IsDir() {
+			if strings.HasPrefix(info.Name(), ".") {
+				return nil // skip hidden files
+			}
 			ext := strings.ToLower(filepath.Ext(info.Name()))
 			if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" {
 				files = append(files, path)
@@ -267,6 +233,7 @@ func getSlides(imgDir, logoPath string, logoFrequency int) (*os.File, error) {
 	}
 	var slideImages []string
 	for _, file := range files {
+		// skip logo
 		if filepath.Clean(file) != filepath.Clean(logoPath) {
 			slideImages = append(slideImages, file)
 		}
@@ -282,49 +249,22 @@ func getSlides(imgDir, logoPath string, logoFrequency int) (*os.File, error) {
 		})
 	}
 
-	fmt.Printf("Starting slideshow from %s with %d slides (logo alternates every %dth slide)\n", imgDir, len(slideImages), logoFrequency)
+	// Not removed here: feh needs to read this file for as long as it's
+	// part of the current slide deck. Old copies are cleaned up by the
+	// "remove old slides" loop in Run when the deck changes; tmpDir itself
+	// is cleaned up by Run's defer on shutdown.
 
-	// Write playlist to temp file for feh
-	playlistFile, err := os.CreateTemp("", "slideshow-playlist-*.txt")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp playlist file: %v", err)
-	}
-	// Not removed here: feh needs to read this file for as long as the
-	// slideshow plays. The player that runs feh against it owns cleanup
-	// (see player.stopLocked), once it's replaced or the process stops.
-
-	for i, file := range slideImages {
-		if i%logoFrequency == 0 { // Insert logo after every x images
-			if _, err := playlistFile.WriteString(logoPath + "\n"); err != nil {
-				_ = playlistFile.Close()
-				return nil, fmt.Errorf("failed to write logo to playlist: %v", err)
+	for i := range slideImages {
+		if i%logoFrequency == 0 && i > 0 { // Insert logo after every x images
+			absLogoPath, err := filepath.Abs(logoPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get absolute path of logo: %w", err)
 			}
+			slideImages = append(slideImages[:i], append([]string{absLogoPath}, slideImages[i:]...)...)
 		}
-		if _, err := playlistFile.WriteString(file + "\n"); err != nil {
-			_ = playlistFile.Close()
-			return nil, fmt.Errorf("failed to write playlist: %v", err)
-		}
-	}
-	if err := playlistFile.Close(); err != nil {
-		return nil, fmt.Errorf("failed to finalize playlist file: %v", err)
-	}
-	return playlistFile, nil
-}
 
-func logo() (string, error) {
-	tmpLogo, err := os.CreateTemp("", "slideshow-logo-*.png")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp logo file: %v", err)
 	}
-	if _, err := tmpLogo.Write(embeddedLogo); err != nil {
-		_ = tmpLogo.Close()
-		return "", fmt.Errorf("failed to write embedded logo: %v", err)
-	}
-	if err := tmpLogo.Close(); err != nil {
-		return "", fmt.Errorf("failed to finalize embedded logo file: %v", err)
-	}
-	logoPath := tmpLogo.Name()
-	return logoPath, nil
+	return slideImages, nil
 }
 
 func expandPath(path string) string {
@@ -336,14 +276,4 @@ func expandPath(path string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
-}
-
-func prompt(reader *bufio.Reader, question, defaultVal string) string {
-	fmt.Printf("%s [%s]: ", question, defaultVal)
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return defaultVal
-	}
-	return input
 }

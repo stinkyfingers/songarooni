@@ -123,7 +123,7 @@ Flags:`)
 
 	// slide show flags
 	fs.StringVar(&cfg.slideShowParentDir, "slideshow-dir", path.Join("/", "media", "admin", "D576-4AA5", "songarooni-images"), "parent directory for slideshow images")
-	fs.IntVar(&cfg.defaultLogoFrequency, "slideshow-logo-frequency", 5, "insert logo after every X images")
+	fs.IntVar(&cfg.defaultLogoFrequency, "slideshow-logo-frequency", 11, "insert logo after every X images")
 	fs.IntVar(&cfg.defaultInterval, "slideshow-interval", 7, "seconds between slides")
 
 	fs.BoolVar(&cfg.quiet, "quiet", false, "suppress progress logging; only print SONG_MATCH lines")
@@ -198,13 +198,10 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Slideshow is a best-effort, nice-to-have feature: if its directory
-	// is missing/misconfigured, log and continue without it rather than
-	// failing the whole program.
 	var matchHandler func(app.MatchEvent)
 	sh, err := slideshow.New(cfg.slideShowParentDir, songMap, cfg.defaultLogoFrequency, cfg.defaultInterval)
 	if err != nil {
-		logger.Printf("slideshow unavailable: %v", err)
+		return fmt.Errorf("slideshow unavailable: %w", err)
 	} else {
 		// debug; no slideshow if audio debug is enabled, to avoid the user discovering
 		if cfg.audioDebug {
@@ -221,6 +218,7 @@ func run() error {
 	}
 
 	if cfg.audio != "" {
+		sh.Start() // start slideshow even in audio file mode, so it can show the match
 		if err = runAudioFileMode(ctx, cfg, m, recognizer, logger, matchHandler); err != nil {
 			return fmt.Errorf("audio file mode error: %w", err)
 		}
@@ -228,7 +226,7 @@ func run() error {
 		return nil
 	}
 
-	if err = runLiveMode(ctx, cfg, m, recognizer, logger, matchHandler); err != nil {
+	if err = runLiveMode(ctx, cfg, m, recognizer, logger, matchHandler, sh.Start); err != nil {
 		return fmt.Errorf("live mode error: %w", err)
 	}
 	time.Sleep(time.Second)
@@ -278,7 +276,7 @@ func runAudioFileMode(ctx context.Context, cfg *cliConfig, m *matcher.Matcher, r
 
 // runLiveMode implements the default, continuous microphone-listening
 // behavior.
-func runLiveMode(ctx context.Context, cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognizer, logger *log.Logger, matchHandler func(app.MatchEvent)) error {
+func runLiveMode(ctx context.Context, cfg *cliConfig, m *matcher.Matcher, recognizer speech.Recognizer, logger *log.Logger, matchHandler func(app.MatchEvent), startSlideshow func()) error {
 	logger.Println("Opening microphone...")
 	mic, err := audio.NewMicSource(cfg.sampleRate)
 	if err != nil {
@@ -291,6 +289,7 @@ func runLiveMode(ctx context.Context, cfg *cliConfig, m *matcher.Matcher, recogn
 	if err != nil {
 		return fmt.Errorf("select device: %w", err)
 	}
+	startSlideshow()
 
 	pipeline := &app.Pipeline{
 		Source:     mic,
