@@ -28,6 +28,11 @@ type Config struct {
 	// ExtraArgs are appended verbatim, for flags this package doesn't
 	// expose directly (e.g. constrained/grammar-guided decoding).
 	ExtraArgs []string
+	// Prompt is passed as whisper.cpp's --prompt: text biasing the
+	// decoder toward specific vocabulary. Used to improve recognition of
+	// song titles whisper would otherwise transcribe phonetically (e.g.
+	// unusual proper nouns like "Chattahoochie").
+	Prompt string
 	// Timeout bounds a single Transcribe call. Zero means DefaultTimeout.
 	Timeout time.Duration
 }
@@ -97,6 +102,9 @@ func (r *WhisperCppRecognizer) buildArgs(wavPath string) []string {
 	}
 	if r.cfg.Threads > 0 {
 		args = append(args, "-t", strconv.Itoa(r.cfg.Threads))
+	}
+	if r.cfg.Prompt != "" {
+		args = append(args, "--prompt", r.cfg.Prompt)
 	}
 	args = append(args, r.cfg.ExtraArgs...)
 	return args
